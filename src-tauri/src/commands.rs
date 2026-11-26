@@ -576,7 +576,7 @@ pub async fn accept_popup_result(
     history_meta: Option<AcceptHistoryMetaDto>,
 ) -> Result<AcceptResultDto, ApiErrorDto> {
     crate::cancel_inflight(&state, WINDOW_POPUP);
-    windows_mgr::hide_popup(&app);
+    windows_mgr::hide_popup_and_wait(&app).await;
 
     let active = state
         .active_capture
@@ -602,19 +602,27 @@ pub async fn accept_popup_result(
         .map_err(|err| ApiErrorDto::new(err.code(), Some(err.to_string())))?;
 
         match res {
-            PasteOutcome::Pasted { .. } => "pasted",
+            PasteOutcome::Pasted { rendered } => {
+                log::info!(
+                    "popup accepted and pasted: app={:?} rendered={}",
+                    source_app,
+                    rendered
+                );
+                "pasted"
+            }
             PasteOutcome::CopiedFallback => {
-                if let Some(popup) = app.get_webview_window(WINDOW_POPUP) {
-                    windows_mgr::set_popup_low_memory(&popup, false);
-                    let _ = popup.show();
-                    let _ = popup.set_focus();
-                }
+                log::info!(
+                    "popup accepted via clipboard fallback: app={:?}",
+                    source_app
+                );
+                windows_mgr::reshow_popup_for_notice(&app);
                 "copied_fallback"
             }
         }
     } else {
         clipboard::write_plain_unicode_text(&text)
             .map_err(|err| ApiErrorDto::new("clipboard_busy", Some(err.to_string())))?;
+        windows_mgr::reshow_popup_for_notice(&app);
         "copied_fallback"
     };
 
@@ -675,7 +683,7 @@ pub async fn dismiss_popup(
     restore_focus: bool,
 ) -> Result<(), ApiErrorDto> {
     crate::cancel_inflight(&state, WINDOW_POPUP);
-    windows_mgr::hide_popup(&app);
+    windows_mgr::hide_popup_and_wait(&app).await;
 
     let active = state
         .active_capture
@@ -708,7 +716,7 @@ pub async fn open_in_editor(
     text: Option<String>,
 ) -> Result<(), ApiErrorDto> {
     crate::cancel_inflight(&state, WINDOW_POPUP);
-    windows_mgr::hide_popup(&app);
+    windows_mgr::hide_popup_and_wait(&app).await;
 
     let source_app = state
         .active_capture
@@ -740,7 +748,7 @@ pub async fn open_in_editor(
 #[tauri::command]
 pub async fn open_settings(app: AppHandle, state: State<'_, AppState>) -> Result<(), ApiErrorDto> {
     crate::cancel_inflight(&state, WINDOW_POPUP);
-    windows_mgr::hide_popup(&app);
+    windows_mgr::hide_popup_and_wait(&app).await;
     windows_mgr::open_or_focus_main(&app)
         .map_err(|err| ApiErrorDto::new("window_error", Some(err.to_string())))?;
     let _ = app.emit("main:navigate", "settings");

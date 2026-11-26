@@ -20,7 +20,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetWindowLongPtrW, HWND_MESSAGE, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW,
     QS_ALLINPUT, RegisterClassW, SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_DESTROYCLIPBOARD, WM_RENDERFORMAT, WNDCLASSW,
+    WINDOW_STYLE, WM_DESTROYCLIPBOARD, WM_RENDERALLFORMATS, WM_RENDERFORMAT, WNDCLASSW,
 };
 use windows::core::{PCWSTR, w};
 
@@ -401,6 +401,13 @@ unsafe extern "system" fn paste_wndproc(
                 }
                 return LRESULT(0);
             }
+            WM_RENDERALLFORMATS => {
+                if let Ok(_guard) = open_clipboard_with_retry(Some(hwnd)) {
+                    let _ = unsafe { set_hglobal_bytes(CF_UNICODETEXT, &state.utf16_bytes) };
+                    state.rendered = true;
+                }
+                return LRESULT(0);
+            }
             WM_DESTROYCLIPBOARD => {
                 state.ownership_lost = true;
                 return LRESULT(0);
@@ -551,6 +558,10 @@ pub fn paste_with_delayed_rendering(text: &str) -> Result<bool, ClipboardError> 
 
     let rendered = state.rendered;
     let ownership_lost = state.ownership_lost;
+    log::debug!(
+        "paste_with_delayed_rendering finished: rendered={rendered} ownership_lost={ownership_lost} elapsed_ms={}",
+        start.elapsed().as_millis()
+    );
 
     // Clear user pointer before restoring (restore triggers WM_DESTROYCLIPBOARD on msg_hwnd).
     unsafe {

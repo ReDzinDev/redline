@@ -31,7 +31,7 @@ use crate::history::HistoryStore;
 use crate::platform::focus::TargetWindow;
 use crate::settings::Settings;
 
-const BLUR_DISMISS_GRACE: Duration = Duration::from_millis(200);
+const BLUR_DISMISS_GRACE: Duration = Duration::from_millis(350);
 
 /// Holds the active inline capture target for the currently open popup session.
 pub struct ActiveCapture {
@@ -128,8 +128,8 @@ fn on_hotkey_pressed(app: &AppHandle) {
         return;
     }
 
-    // Toggle closed if the popup is already visible.
-    if state.popup_visible.load(Ordering::SeqCst) {
+    // Toggle closed if the popup is already visible (check both state and OS window visibility).
+    if state.popup_visible.load(Ordering::SeqCst) || windows_mgr::is_popup_hwnd_visible(app) {
         cancel_inflight(&state, WINDOW_POPUP);
         windows_mgr::hide_popup(app);
         let active = state

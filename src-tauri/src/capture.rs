@@ -303,6 +303,10 @@ fn run_paste(target: &focus::TargetWindow, text: &str) -> Result<PasteOutcome, C
         return Ok(PasteOutcome::CopiedFallback);
     }
 
+    // Brief settle so WinUI/Electron/browser edit controls finish processing WM_ACTIVATE
+    // before receiving Ctrl+V.
+    std::thread::sleep(Duration::from_millis(30));
+
     let rendered = clipboard::paste_with_delayed_rendering(text).map_err(map_clip_err)?;
     Ok(PasteOutcome::Pasted { rendered })
 }

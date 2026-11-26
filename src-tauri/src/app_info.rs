@@ -7,9 +7,11 @@ pub const WINDOW_POPUP: &str = "popup";
 pub const MAIN_ENTRY: &str = "index.html";
 pub const POPUP_ENTRY: &str = "popup.html";
 
-pub const POPUP_WIDTH_LOGICAL: f64 = 460.0;
+pub const POPUP_WIDTH_LOGICAL: f64 = 500.0;
 pub const POPUP_COMPACT_HEIGHT_LOGICAL: f64 = 320.0;
-pub const POPUP_EXPANDED_HEIGHT_LOGICAL: f64 = 520.0;
+pub const POPUP_EXPANDED_HEIGHT_LOGICAL: f64 = 560.0;
+pub const POPUP_MIN_WIDTH_LOGICAL: f64 = 420.0;
+pub const POPUP_MIN_HEIGHT_LOGICAL: f64 = 280.0;
 
 pub const TRAY_OPEN_ID: &str = "tray-open";
 pub const TRAY_PAUSE_ID: &str = "tray-pause";

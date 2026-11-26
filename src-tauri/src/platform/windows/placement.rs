@@ -8,7 +8,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetWindowRect, HWND_TOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
+    GetCursorPos, GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow,
 };
 
 const CURSOR_OFFSET_LOGICAL: f64 = 12.0;
@@ -223,6 +224,40 @@ pub fn move_resize_topmost(hwnd_raw: isize, rect: PopupRect) {
             SWP_NOACTIVATE,
         );
     }
+}
+
+/// Synchronously hides the popup HWND via Win32 `ShowWindow(SW_HIDE)`.
+/// Guarantees the window vanishes immediately even if `tao`'s cached `WindowFlags::VISIBLE`
+/// was false (e.g. when dismissed during the no-activate capturing phase) and before
+/// `restore_focus` + `Ctrl+V` paste run.
+pub fn hide_window_immediately(hwnd_raw: isize) {
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+/// Explicitly brings our popup HWND to the foreground after capture finishes.
+pub fn force_activate_window(hwnd_raw: isize) {
+    if hwnd_raw == 0 {
+        return;
+    }
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// Returns true if the popup HWND is currently visible according to Windows.
+pub fn is_window_visible(hwnd_raw: isize) -> bool {
+    if hwnd_raw == 0 {
+        return false;
+    }
+    let hwnd = HWND(hwnd_raw as *mut c_void);
+    unsafe { IsWindowVisible(hwnd).as_bool() }
 }
 
 #[cfg(test)]
