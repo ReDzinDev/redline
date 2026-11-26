@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 /**
  * Typed wrappers around Tauri commands and events (mirrored from src-tauri/src/dto.rs).
@@ -13,6 +14,7 @@ export type ErrorCode =
   | "secret_store_error"
   | "settings_save_failed"
   | "invalid_model"
+  | "invalid_action"
   | "ai_no_key"
   | "ai_bad_request"
   | "ai_unauthorized"
@@ -38,6 +40,7 @@ export interface AppStatusDto {
   hotkey: string;
   hotkeyConflict: string | null;
   settingsRecovered: boolean;
+  welcomeCompleted: boolean;
 }
 
 export interface SettingsDto {
@@ -48,6 +51,8 @@ export interface SettingsDto {
   historyEnabled: boolean;
   autoRunAction: string | null;
   dialect: string;
+  recentCustomInstructions: string[];
+  welcomeCompleted: boolean;
 }
 
 export interface ModelOptionDto {
@@ -61,6 +66,75 @@ export interface ModelOptionDto {
 export interface KeyTestResultDto {
   label: string | null;
   limitRemaining: number | null;
+}
+
+export type PopupSessionEvent =
+  | {
+      phase: "capturing";
+      sessionId: number;
+      sourceApp: string;
+    }
+  | {
+      phase: "ready";
+      sessionId: number;
+      sourceApp: string;
+      text: string;
+      recentCustomInstructions: string[];
+      autoRunAction: string | null;
+    }
+  | {
+      phase: "error";
+      sessionId: number;
+      sourceApp: string;
+      errorCode: string;
+    };
+
+export type ActionKind =
+  | "improve"
+  | "fix_grammar"
+  | "shorten"
+  | "make_clearer"
+  | "change_tone"
+  | "custom";
+
+export type ToneOption = "professional" | "friendly" | "casual" | "confident";
+
+export interface ActionRequestDto {
+  kind: ActionKind;
+  tone?: ToneOption;
+  customInstruction?: string;
+}
+
+export type RewriteStreamEvent =
+  | { event: "delta"; requestId: number; text: string }
+  | {
+      event: "complete";
+      requestId: number;
+      text: string;
+      modelUsed: string;
+      costUsd: number | null;
+      elapsedMs: number;
+      unchanged: boolean;
+    }
+  | {
+      event: "cutOff";
+      requestId: number;
+      partialText: string;
+      detail: string | null;
+    }
+  | {
+      event: "error";
+      requestId: number;
+      error: ApiErrorDto;
+    };
+
+export interface AcceptResultDto {
+  outcome: "pasted" | "copied_fallback";
+}
+
+export interface PendingEditorDraft {
+  text: string;
+  sourceApp: string | null;
 }
 
 export function isApiError(value: unknown): value is ApiErrorDto {
@@ -104,4 +178,58 @@ export function saveModel(model: string): Promise<SettingsDto> {
 
 export function savePrivacy(denyDataCollection: boolean): Promise<SettingsDto> {
   return invoke<SettingsDto>("save_privacy", { denyDataCollection });
+}
+
+export function rewriteText(
+  requestId: number,
+  text: string,
+  action: ActionRequestDto,
+  onEvent: (event: RewriteStreamEvent) => void,
+): Promise<void> {
+  const channel = new Channel<RewriteStreamEvent>();
+  channel.onmessage = onEvent;
+  return invoke<void>("rewrite_text", {
+    requestId,
+    text,
+    action,
+    onEvent: channel,
+  });
+}
+
+export function cancelRewrite(): Promise<void> {
+  return invoke<void>("cancel_rewrite");
+}
+
+export function resizePopup(expanded: boolean): Promise<void> {
+  return invoke<void>("resize_popup", { expanded });
+}
+
+export function acceptPopupResult(text: string): Promise<AcceptResultDto> {
+  return invoke<AcceptResultDto>("accept_popup_result", { text });
+}
+
+export function dismissPopup(restoreFocus: boolean): Promise<void> {
+  return invoke<void>("dismiss_popup", { restoreFocus });
+}
+
+export function copyToClipboard(text: string): Promise<void> {
+  return invoke<void>("copy_to_clipboard", { text });
+}
+
+export function openInEditor(text?: string): Promise<void> {
+  return invoke<void>("open_in_editor", { text: text ?? null });
+}
+
+export function openSettings(): Promise<void> {
+  return invoke<void>("open_settings");
+}
+
+export function takeEditorDraft(): Promise<PendingEditorDraft | null> {
+  return invoke<PendingEditorDraft | null>("take_editor_draft");
+}
+
+export function listenPopupSession(
+  handler: (event: PopupSessionEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<PopupSessionEvent>("popup:session", (evt) => handler(evt.payload));
 }
