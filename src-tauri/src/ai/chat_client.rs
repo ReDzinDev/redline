@@ -226,6 +226,75 @@ pub async fn test_openrouter_key(api_key: &str) -> Result<KeyTestResultDto, AiEr
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct ModelsListEnvelope {
+    #[serde(default)]
+    data: Vec<Value>,
+}
+
+/// Checks that a custom model ID exists in OpenRouter's catalog and derives its `ReasoningMode`.
+/// Only the small derived result is stored in settings — never the full catalog.
+pub async fn validate_custom_model(
+    model_id: &str,
+    api_key: Option<&str>,
+) -> Result<ReasoningMode, AiError> {
+    let target = model_id.trim();
+    if target.is_empty() {
+        return Err(AiError::BadRequest {
+            message: Some("Model ID cannot be empty".to_string()),
+        });
+    }
+
+    let client = build_http_client()?;
+    let url = format!("{OPENROUTER_BASE_URL}/models");
+    let mut req = client.get(&url).header("X-OpenRouter-Title", "Redline");
+    if let Some(key) = api_key.map(str::trim).filter(|k| !k.is_empty()) {
+        req = req.bearer_auth(key);
+    }
+
+    let response = req.send().await.map_err(|err| AiError::TimeoutOrNetwork {
+        message: Some(err.to_string()),
+    })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned);
+        let body = response.text().await.unwrap_or_default();
+        return Err(map_http_error(
+            status.as_u16(),
+            &body,
+            retry_after.as_deref(),
+        ));
+    }
+
+    let parsed: ModelsListEnvelope =
+        response
+            .json()
+            .await
+            .map_err(|err| AiError::TimeoutOrNetwork {
+                message: Some(err.to_string()),
+            })?;
+
+    let found = parsed
+        .data
+        .iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(target));
+
+    let Some(model_obj) = found else {
+        return Err(AiError::BadRequest {
+            message: Some(format!("Model '{target}' was not found on OpenRouter.")),
+        });
+    };
+
+    Ok(crate::ai::models::derive_reasoning_mode_from_catalog(
+        model_obj.get("reasoning"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

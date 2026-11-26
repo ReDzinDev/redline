@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main-window",
-  "description": "Minimal permissions for the main window",
+  "description": "Minimal permissions for the main window (opener scoped to fixed URLs only)",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://github.com/ReDzinDev/redline" },
+        { "url": "https://openrouter.ai/keys" },
+        { "url": "https://openrouter.ai/settings/credits" }
+      ]
+    }
+  ]
 }

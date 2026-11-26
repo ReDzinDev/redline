@@ -1,24 +1,36 @@
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt as AutostartExt;
+use tauri_plugin_global_shortcut::GlobalShortcutExt;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::AppState;
-use crate::ai::chat_client::{ChatClient, test_openrouter_key};
+use crate::ai::chat_client::{ChatClient, test_openrouter_key, validate_custom_model};
 use crate::ai::models::{curated_model_dtos, reasoning_mode_for_model};
 use crate::ai::prompts::{Action, build_prompt, postprocess_reply_lf, restore_line_endings};
 use crate::ai::provider::{AiError, ChatRequest, Provider};
-use crate::app_info::{EDITOR_MAX_INPUT_CHARS, POPUP_MAX_INPUT_CHARS, WINDOW_POPUP};
+use crate::app_info::{
+    EDITOR_MAX_INPUT_CHARS, OPENROUTER_CREDITS_URL, OPENROUTER_KEYS_URL, POPUP_MAX_INPUT_CHARS,
+    REPO_URL, WINDOW_MAIN, WINDOW_POPUP,
+};
 use crate::capture::PasteOutcome;
 use crate::dto::{
-    AcceptResultDto, ActionRequestDto, ApiErrorDto, AppStatusDto, KeyTestResultDto,
-    LintResponseDto, ModelOptionDto, PendingEditorDraft, RewriteStreamEvent, SettingsDto,
+    AcceptHistoryMetaDto, AcceptResultDto, ActionRequestDto, ApiErrorDto, AppStatusDto,
+    KeyTestResultDto, LintResponseDto, ModelOptionDto, PendingEditorDraft, RewriteStreamEvent,
+    SettingsDto,
 };
+use crate::history::{HistoryEntry, NewHistoryEntry};
 use crate::platform::clipboard;
 use crate::{secrets, settings, windows_mgr};
 
 #[tauri::command]
-pub fn get_app_status(state: State<'_, AppState>) -> Result<AppStatusDto, ApiErrorDto> {
+pub fn get_app_status(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppStatusDto, ApiErrorDto> {
     let has_api_key = secrets::has_api_key()
         .map_err(|err| ApiErrorDto::new("secret_store_error", Some(err.to_string())))?;
     let (hotkey, welcome_completed) = {
@@ -33,13 +45,23 @@ pub fn get_app_status(state: State<'_, AppState>) -> Result<AppStatusDto, ApiErr
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+    let history_recovered = state
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .recovered_from_corrupt;
 
     Ok(AppStatusDto {
         has_api_key,
         hotkey,
         hotkey_conflict,
+        hotkey_paused: state.hotkey_paused.load(Ordering::SeqCst),
         settings_recovered: state.settings_recovered,
+        history_recovered,
         welcome_completed,
+        autostart_enabled,
+        app_version: app.package_info().version.to_string(),
     })
 }
 
@@ -110,6 +132,38 @@ pub fn save_model(state: State<'_, AppState>, model: String) -> Result<SettingsD
 }
 
 #[tauri::command]
+pub async fn save_custom_model(
+    state: State<'_, AppState>,
+    custom_model_id: Option<String>,
+) -> Result<SettingsDto, ApiErrorDto> {
+    let trimmed = custom_model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned);
+
+    let derived_reasoning = match trimmed.as_deref() {
+        Some(model_id) => {
+            let api_key = secrets::get_api_key().ok().flatten();
+            let mode = validate_custom_model(model_id, api_key.as_deref()).await?;
+            Some(mode)
+        }
+        None => None,
+    };
+
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.custom_model_id = trimmed;
+    guard.custom_model_reasoning = derived_reasoning;
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    log::info!("updated custom_model_id={:?}", guard.custom_model_id);
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
 pub fn save_privacy(
     state: State<'_, AppState>,
     deny_data_collection: bool,
@@ -151,6 +205,170 @@ pub fn save_dialect(
     state.grammar.set_dialect(normalized);
     log::info!("updated grammar dialect={normalized}");
     Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn save_hotkey(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    hotkey: String,
+) -> Result<SettingsDto, ApiErrorDto> {
+    let next = hotkey.trim();
+    if next.is_empty() {
+        return Err(ApiErrorDto::new(
+            "hotkey_conflict",
+            Some("Shortcut cannot be empty".to_string()),
+        ));
+    }
+
+    let previous = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .hotkey
+        .clone();
+
+    let paused = state.hotkey_paused.load(Ordering::SeqCst);
+    if !paused {
+        let _ = app.global_shortcut().unregister(previous.as_str());
+        if let Err(err) = app.global_shortcut().register(next) {
+            // Re-register previous hotkey if the new one is unavailable.
+            let _ = app.global_shortcut().register(previous.as_str());
+            log::warn!("hotkey '{next}' could not be registered: {err}");
+            return Err(ApiErrorDto::new("hotkey_conflict", Some(next.to_string())));
+        }
+    }
+
+    *state
+        .hotkey_conflict
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.hotkey = next.to_string();
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    log::info!("updated global hotkey to '{}'", guard.hotkey);
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn save_history_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<SettingsDto, ApiErrorDto> {
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.history_enabled = enabled;
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn save_auto_run_action(
+    state: State<'_, AppState>,
+    action: Option<String>,
+) -> Result<SettingsDto, ApiErrorDto> {
+    let normalized = match action.as_deref() {
+        Some("improve") => Some("improve".to_string()),
+        Some("fix_grammar") => Some("fix_grammar".to_string()),
+        Some("shorten") => Some("shorten".to_string()),
+        Some("make_clearer") => Some("make_clearer".to_string()),
+        _ => None,
+    };
+
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.auto_run_action = normalized;
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<bool, ApiErrorDto> {
+    let manager = app.autolaunch();
+    let res = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    res.map_err(|err| ApiErrorDto::new("autostart_error", Some(err.to_string())))?;
+    Ok(manager.is_enabled().unwrap_or(enabled))
+}
+
+#[tauri::command]
+pub fn complete_welcome(state: State<'_, AppState>) -> Result<SettingsDto, ApiErrorDto> {
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.welcome_completed = true;
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn get_history(state: State<'_, AppState>) -> Vec<HistoryEntry> {
+    state
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entries()
+}
+
+#[tauri::command]
+pub fn clear_history(state: State<'_, AppState>) -> Result<(), ApiErrorDto> {
+    state
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear()
+        .map_err(|err| ApiErrorDto::new("history_error", Some(err.to_string())))
+}
+
+#[tauri::command]
+pub fn open_external_url(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    target: String,
+) -> Result<(), ApiErrorDto> {
+    if window.label() != WINDOW_MAIN {
+        return Err(ApiErrorDto::new("forbidden_window", None));
+    }
+    let url = match target.as_str() {
+        "repo" => REPO_URL,
+        "openrouter_keys" => OPENROUTER_KEYS_URL,
+        "openrouter_credits" => OPENROUTER_CREDITS_URL,
+        _ => return Err(ApiErrorDto::new("invalid_url_target", None)),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|err| ApiErrorDto::new("opener_error", Some(err.to_string())))
+}
+
+#[tauri::command]
+pub fn open_log_folder(app: AppHandle, window: tauri::WebviewWindow) -> Result<(), ApiErrorDto> {
+    if window.label() != WINDOW_MAIN {
+        return Err(ApiErrorDto::new("forbidden_window", None));
+    }
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|err| ApiErrorDto::new("opener_error", Some(err.to_string())))?;
+    let _ = std::fs::create_dir_all(&log_dir);
+    app.opener()
+        .open_path(log_dir.to_string_lossy().to_string(), None::<&str>)
+        .map_err(|err| ApiErrorDto::new("opener_error", Some(err.to_string())))
 }
 
 #[tauri::command]
@@ -355,6 +573,7 @@ pub async fn accept_popup_result(
     app: AppHandle,
     state: State<'_, AppState>,
     text: String,
+    history_meta: Option<AcceptHistoryMetaDto>,
 ) -> Result<AcceptResultDto, ApiErrorDto> {
     crate::cancel_inflight(&state, WINDOW_POPUP);
     windows_mgr::hide_popup(&app);
@@ -365,44 +584,88 @@ pub async fn accept_popup_result(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .take();
 
-    let Some(capture) = active else {
+    let source_app = active.as_ref().map(|c| c.target.process_name.clone());
+
+    let outcome = if let Some(capture) = active {
+        let final_text = restore_line_endings(&text, capture.original_line_ending);
+        let target = capture.target;
+        let paste_app = app.clone();
+
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            paste_app
+                .state::<AppState>()
+                .worker
+                .paste_result(target, final_text)
+        })
+        .await
+        .map_err(|err| ApiErrorDto::new("paste_failed", Some(err.to_string())))?
+        .map_err(|err| ApiErrorDto::new(err.code(), Some(err.to_string())))?;
+
+        match res {
+            PasteOutcome::Pasted { .. } => "pasted",
+            PasteOutcome::CopiedFallback => {
+                if let Some(popup) = app.get_webview_window(WINDOW_POPUP) {
+                    windows_mgr::set_popup_low_memory(&popup, false);
+                    let _ = popup.show();
+                    let _ = popup.set_focus();
+                }
+                "copied_fallback"
+            }
+        }
+    } else {
         clipboard::write_plain_unicode_text(&text)
             .map_err(|err| ApiErrorDto::new("clipboard_busy", Some(err.to_string())))?;
-        return Ok(AcceptResultDto {
-            outcome: "copied_fallback".to_string(),
-        });
+        "copied_fallback"
     };
 
-    let final_text = restore_line_endings(&text, capture.original_line_ending);
-    let target = capture.target;
-    let paste_app = app.clone();
-
-    let res = tauri::async_runtime::spawn_blocking(move || {
-        paste_app
-            .state::<AppState>()
-            .worker
-            .paste_result(target, final_text)
-    })
-    .await
-    .map_err(|err| ApiErrorDto::new("paste_failed", Some(err.to_string())))?
-    .map_err(|err| ApiErrorDto::new(err.code(), Some(err.to_string())))?;
-
-    let outcome = match res {
-        PasteOutcome::Pasted { .. } => "pasted",
-        PasteOutcome::CopiedFallback => {
-            // Re-show the popup briefly so the user sees the "Copied: paste it with Ctrl+V." notice.
-            if let Some(popup) = app.get_webview_window(WINDOW_POPUP) {
-                windows_mgr::set_popup_low_memory(&popup, false);
-                let _ = popup.show();
-                let _ = popup.set_focus();
-            }
-            "copied_fallback"
+    // Save history entry if history is enabled (covers both AI rewrites and Harper-only pastes).
+    if let Some(meta) = history_meta {
+        let enabled = state
+            .settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .history_enabled;
+        if let Err(err) = state
+            .history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(
+                enabled,
+                NewHistoryEntry {
+                    action: meta.action,
+                    source_app,
+                    model: meta.model,
+                    cost_usd: meta.cost_usd,
+                    original: meta.original,
+                    result: text,
+                },
+            )
+        {
+            log::warn!("failed saving history entry: {err}");
         }
-    };
+    }
 
     Ok(AcceptResultDto {
         outcome: outcome.to_string(),
     })
+}
+
+#[tauri::command]
+pub fn record_history_entry(
+    state: State<'_, AppState>,
+    entry: NewHistoryEntry,
+) -> Result<(), ApiErrorDto> {
+    let enabled = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .history_enabled;
+    state
+        .history
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .record(enabled, entry)
+        .map_err(|err| ApiErrorDto::new("history_error", Some(err.to_string())))
 }
 
 #[tauri::command]
@@ -465,6 +728,7 @@ pub async fn open_in_editor(
 
     windows_mgr::open_or_focus_main(&app)
         .map_err(|err| ApiErrorDto::new("window_error", Some(err.to_string())))?;
+    let _ = app.emit("main:navigate", "write");
 
     if let Some(payload) = draft {
         let _ = app.emit("editor:load-draft", payload);

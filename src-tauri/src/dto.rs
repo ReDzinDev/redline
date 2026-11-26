@@ -12,8 +12,12 @@ pub struct AppStatusDto {
     pub has_api_key: bool,
     pub hotkey: String,
     pub hotkey_conflict: Option<String>,
+    pub hotkey_paused: bool,
     pub settings_recovered: bool,
+    pub history_recovered: bool,
     pub welcome_completed: bool,
+    pub autostart_enabled: bool,
+    pub app_version: String,
 }
 
 /// Settings snapshot exposed to the frontend.
@@ -191,6 +195,15 @@ pub enum RewriteStreamEvent {
     },
     #[serde(rename_all = "camelCase")]
     Error { request_id: u64, error: ApiErrorDto },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptHistoryMetaDto {
+    pub action: String,
+    pub model: String,
+    pub cost_usd: Option<f64>,
+    pub original: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

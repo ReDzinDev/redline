@@ -4,6 +4,7 @@ mod capture;
 mod commands;
 mod dto;
 mod grammar;
+mod history;
 mod platform;
 mod secrets;
 mod settings;
@@ -17,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
@@ -25,6 +27,7 @@ use crate::app_info::WINDOW_POPUP;
 use crate::capture::PlatformWorker;
 use crate::dto::{PendingEditorDraft, PopupSessionEvent};
 use crate::grammar::GrammarEngine;
+use crate::history::HistoryStore;
 use crate::platform::focus::TargetWindow;
 use crate::settings::Settings;
 
@@ -39,6 +42,7 @@ pub struct ActiveCapture {
 /// Shared application state managed by Tauri.
 pub struct AppState {
     pub quitting: AtomicBool,
+    pub hotkey_paused: AtomicBool,
     pub popup_visible: AtomicBool,
     pub popup_capturing: AtomicBool,
     pub popup_activated_at: Mutex<Option<Instant>>,
@@ -50,6 +54,7 @@ pub struct AppState {
     pub settings_path: PathBuf,
     pub settings_recovered: bool,
     pub hotkey_conflict: Mutex<Option<String>>,
+    pub history: Mutex<HistoryStore>,
     pub worker: PlatformWorker,
     pub grammar: GrammarEngine,
 }
@@ -117,14 +122,11 @@ fn build_log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-/// Milestone 2 inline popup flow:
-/// 1. If popup is already open -> toggle it closed and restore focus.
-/// 2. If platform worker is busy -> ignore.
-/// 3. Record foreground window, show popup at cursor WITHOUT activating in "Capturing..." state.
-/// 4. Capture selection on MTA COM worker thread (UIA first, clipboard fallback).
-/// 5. Activate popup and emit captured text (or structured error code).
 fn on_hotkey_pressed(app: &AppHandle) {
     let state = app.state::<AppState>();
+    if state.hotkey_paused.load(Ordering::SeqCst) {
+        return;
+    }
 
     // Toggle closed if the popup is already visible.
     if state.popup_visible.load(Ordering::SeqCst) {
@@ -192,7 +194,6 @@ fn on_hotkey_pressed(app: &AppHandle) {
         .await;
 
         let state = app_handle.state::<AppState>();
-        // If user dismissed popup before capture finished, ignore stale result.
         if !state.popup_visible.load(Ordering::SeqCst)
             || state.session_counter.load(Ordering::SeqCst) != session_id
         {
@@ -289,6 +290,11 @@ pub fn run() {
             }
         }))
         .plugin(build_log_plugin())
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_opener::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -306,8 +312,19 @@ pub fn run() {
             commands::delete_api_key,
             commands::test_api_key,
             commands::save_model,
+            commands::save_custom_model,
             commands::save_privacy,
             commands::save_dialect,
+            commands::save_hotkey,
+            commands::save_history_enabled,
+            commands::save_auto_run_action,
+            commands::set_autostart_enabled,
+            commands::complete_welcome,
+            commands::get_history,
+            commands::clear_history,
+            commands::record_history_entry,
+            commands::open_external_url,
+            commands::open_log_folder,
             commands::lint_text,
             commands::rewrite_text,
             commands::cancel_rewrite,
@@ -325,9 +342,13 @@ pub fn run() {
             }
 
             let config_dir = app.path().app_config_dir()?;
-            let path = settings::settings_path(&config_dir);
-            let loaded = settings::load_from_path(&path);
+            let data_dir = app.path().app_data_dir()?;
+            let settings_file = settings::settings_path(&config_dir);
+            let loaded = settings::load_from_path(&settings_file);
+            let history_store = HistoryStore::load_from_path(history::history_path(&data_dir));
+
             let hotkey = loaded.settings.hotkey.clone();
+            let first_launch = !loaded.settings.welcome_completed;
 
             let worker = PlatformWorker::spawn();
             let grammar = GrammarEngine::new(&loaded.settings.dialect);
@@ -340,10 +361,16 @@ pub fn run() {
                 log::info!("registered global shortcut '{hotkey}'");
             }
 
-            let open_settings_on_start = conflict.is_some();
+            let open_main_on_start = first_launch || conflict.is_some();
+            let initial_nav = if conflict.is_some() {
+                "settings"
+            } else {
+                "write"
+            };
 
             app.manage(AppState {
                 quitting: AtomicBool::new(false),
+                hotkey_paused: AtomicBool::new(false),
                 popup_visible: AtomicBool::new(false),
                 popup_capturing: AtomicBool::new(false),
                 popup_activated_at: Mutex::new(None),
@@ -352,22 +379,23 @@ pub fn run() {
                 pending_editor_draft: Mutex::new(None),
                 inflight_rewrites: Mutex::new(HashMap::new()),
                 settings: Mutex::new(loaded.settings),
-                settings_path: path,
+                settings_path: settings_file,
                 settings_recovered: loaded.recovered_from_corrupt,
                 hotkey_conflict: Mutex::new(conflict),
+                history: Mutex::new(history_store),
                 worker,
                 grammar,
             });
 
-            // Pre-create hidden popup window for instant hotkey response.
             windows_mgr::precreate_popup(app.handle())?;
             tray::setup(app)?;
 
-            if open_settings_on_start {
+            if open_main_on_start {
                 let _ = windows_mgr::open_or_focus_main(app.handle());
+                let _ = app.emit("main:navigate", initial_nav);
             }
 
-            log::info!("{} started in tray", app_info::APP_NAME);
+            log::info!("{} started", app_info::APP_NAME);
             Ok(())
         })
         .build(tauri::generate_context!())

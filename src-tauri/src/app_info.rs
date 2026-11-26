@@ -12,8 +12,13 @@ pub const POPUP_COMPACT_HEIGHT_LOGICAL: f64 = 320.0;
 pub const POPUP_EXPANDED_HEIGHT_LOGICAL: f64 = 520.0;
 
 pub const TRAY_OPEN_ID: &str = "tray-open";
+pub const TRAY_PAUSE_ID: &str = "tray-pause";
 pub const TRAY_SETTINGS_ID: &str = "tray-settings";
 pub const TRAY_QUIT_ID: &str = "tray-quit";
+
+pub const REPO_URL: &str = "https://github.com/ReDzinDev/redline";
+pub const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/keys";
+pub const OPENROUTER_CREDITS_URL: &str = "https://openrouter.ai/settings/credits";
 
 pub const KEYRING_SERVICE: &str = "dev.redline.app";
 pub const KEYRING_OPENROUTER_USER: &str = "openrouter_api_key";
