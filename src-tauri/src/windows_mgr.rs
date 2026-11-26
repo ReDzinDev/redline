@@ -66,7 +66,7 @@ pub fn open_or_focus_main(app: &AppHandle) -> tauri::Result<()> {
 
 /// Pre-creates the frameless inline popup window hidden at startup so hotkey-to-popup is instant.
 /// Disables WebView2 browser accelerator keys and enables low-memory mode while hidden.
-pub fn precreate_popup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+pub fn precreate_popup(app: &AppHandle) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, WINDOW_POPUP, WebviewUrl::App(POPUP_ENTRY.into()))
         .title(APP_NAME)
         .visible(false)

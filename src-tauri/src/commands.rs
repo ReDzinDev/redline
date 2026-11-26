@@ -283,8 +283,8 @@ pub async fn rewrite_text(
         }
 
         // Remove our handle once finished so map doesn't retain completed JoinHandles.
-        let mut inflight = app_for_cleanup
-            .state::<AppState>()
+        let app_state = app_for_cleanup.state::<AppState>();
+        let mut inflight = app_state
             .inflight_rewrites
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
