@@ -205,3 +205,34 @@ pub struct PendingEditorDraft {
     pub text: String,
     pub source_app: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionDto {
+    pub label: String,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LintDto {
+    pub id: String,
+    /// UTF-16 start offset into the LF-normalized text.
+    pub start: usize,
+    /// UTF-16 end offset into the LF-normalized text.
+    pub end: usize,
+    pub flagged: String,
+    /// `"spelling" | "grammar" | "style"` for distinct underline styles.
+    pub category: String,
+    pub kind: String,
+    pub message: String,
+    pub suggestions: Vec<SuggestionDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LintResponseDto {
+    pub request_id: u64,
+    pub english: bool,
+    pub lints: Vec<LintDto>,
+}

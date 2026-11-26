@@ -3,6 +3,7 @@ mod app_info;
 mod capture;
 mod commands;
 mod dto;
+mod grammar;
 mod platform;
 mod secrets;
 mod settings;
@@ -23,6 +24,7 @@ use crate::ai::prompts::{LineEnding, normalize_line_endings};
 use crate::app_info::WINDOW_POPUP;
 use crate::capture::PlatformWorker;
 use crate::dto::{PendingEditorDraft, PopupSessionEvent};
+use crate::grammar::GrammarEngine;
 use crate::platform::focus::TargetWindow;
 use crate::settings::Settings;
 
@@ -49,6 +51,7 @@ pub struct AppState {
     pub settings_recovered: bool,
     pub hotkey_conflict: Mutex<Option<String>>,
     pub worker: PlatformWorker,
+    pub grammar: GrammarEngine,
 }
 
 impl AppState {
@@ -304,6 +307,8 @@ pub fn run() {
             commands::test_api_key,
             commands::save_model,
             commands::save_privacy,
+            commands::save_dialect,
+            commands::lint_text,
             commands::rewrite_text,
             commands::cancel_rewrite,
             commands::resize_popup,
@@ -325,6 +330,7 @@ pub fn run() {
             let hotkey = loaded.settings.hotkey.clone();
 
             let worker = PlatformWorker::spawn();
+            let grammar = GrammarEngine::new(&loaded.settings.dialect);
             let mut conflict: Option<String> = None;
 
             if let Err(err) = app.global_shortcut().register(hotkey.as_str()) {
@@ -350,6 +356,7 @@ pub fn run() {
                 settings_recovered: loaded.recovered_from_corrupt,
                 hotkey_conflict: Mutex::new(conflict),
                 worker,
+                grammar,
             });
 
             // Pre-create hidden popup window for instant hotkey response.

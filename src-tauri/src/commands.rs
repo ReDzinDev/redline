@@ -11,8 +11,8 @@ use crate::ai::provider::{AiError, ChatRequest, Provider};
 use crate::app_info::{EDITOR_MAX_INPUT_CHARS, POPUP_MAX_INPUT_CHARS, WINDOW_POPUP};
 use crate::capture::PasteOutcome;
 use crate::dto::{
-    AcceptResultDto, ActionRequestDto, ApiErrorDto, AppStatusDto, KeyTestResultDto, ModelOptionDto,
-    PendingEditorDraft, RewriteStreamEvent, SettingsDto,
+    AcceptResultDto, ActionRequestDto, ApiErrorDto, AppStatusDto, KeyTestResultDto,
+    LintResponseDto, ModelOptionDto, PendingEditorDraft, RewriteStreamEvent, SettingsDto,
 };
 use crate::platform::clipboard;
 use crate::{secrets, settings, windows_mgr};
@@ -126,6 +126,45 @@ pub fn save_privacy(
         guard.deny_data_collection
     );
     Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub fn save_dialect(
+    state: State<'_, AppState>,
+    dialect: String,
+) -> Result<SettingsDto, ApiErrorDto> {
+    let normalized = match dialect.trim().to_ascii_lowercase().as_str() {
+        "british" => "british",
+        "canadian" => "canadian",
+        "australian" => "australian",
+        "indian" => "indian",
+        _ => "american",
+    };
+
+    let mut guard = state
+        .settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.dialect = normalized.to_string();
+    settings::save_to_path(&state.settings_path, &guard)
+        .map_err(|err| ApiErrorDto::new("settings_save_failed", Some(err.to_string())))?;
+    state.grammar.set_dialect(normalized);
+    log::info!("updated grammar dialect={normalized}");
+    Ok(SettingsDto::from(&*guard))
+}
+
+#[tauri::command]
+pub async fn lint_text(
+    app: AppHandle,
+    text: String,
+    request_id: u64,
+) -> Result<LintResponseDto, ApiErrorDto> {
+    let lint_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        lint_app.state::<AppState>().grammar.lint(&text, request_id)
+    })
+    .await
+    .map_err(|err| ApiErrorDto::new("lint_failed", Some(err.to_string())))
 }
 
 #[tauri::command]
