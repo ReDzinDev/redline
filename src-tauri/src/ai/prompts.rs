@@ -169,12 +169,8 @@ pub fn build_prompt(action: &Action, raw_input: &str) -> BuiltPrompt {
     }
 }
 
-/// Applies the 4-step post-processing safety net from §3 in exact order:
-/// 1. Strip echoed `<text>` / `<{tag}>` tags.
-/// 2. Strip a wrapping code fence or wrapping double quotes ONLY if the input didn't have them.
-/// 3. Put back the selection's original leading/trailing whitespace.
-/// 4. Restore the input's line endings (CRLF if it originally had CRLF).
-pub fn postprocess_reply(raw_reply: &str, built: &BuiltPrompt) -> String {
+/// Applies steps 1–3 of the safety net keeping LF line endings (for UI display and diffing).
+pub fn postprocess_reply_lf(raw_reply: &str, built: &BuiltPrompt) -> String {
     let normalized_reply = raw_reply.replace("\r\n", "\n");
     let mut text = normalized_reply.trim().to_string();
 
@@ -201,17 +197,22 @@ pub fn postprocess_reply(raw_reply: &str, built: &BuiltPrompt) -> String {
 
     // 3. Restore the selection's original leading/trailing whitespace.
     let core = text.trim();
-    let restored_ws = if core.is_empty() {
+    if core.is_empty() {
         String::new()
     } else {
         format!(
             "{}{}{}",
             built.original_leading_ws, core, built.original_trailing_ws
         )
-    };
+    }
+}
 
+/// Applies the full 4-step post-processing safety net from §3 (including original CRLF restore).
+#[allow(dead_code)]
+pub fn postprocess_reply(raw_reply: &str, built: &BuiltPrompt) -> String {
+    let lf = postprocess_reply_lf(raw_reply, built);
     // 4. Restore original line endings.
-    restore_line_endings(&restored_ws, built.original_line_ending)
+    restore_line_endings(&lf, built.original_line_ending)
 }
 
 fn strip_wrapping_tag(s: &str, tag: &str) -> String {

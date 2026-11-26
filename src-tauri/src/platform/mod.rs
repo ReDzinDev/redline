@@ -2,4 +2,4 @@
 pub mod windows;
 
 #[cfg(windows)]
-pub use windows::{clipboard, focus, input, uia};
+pub use windows::{clipboard, focus, input, placement, uia};

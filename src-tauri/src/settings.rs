@@ -7,6 +7,7 @@ use crate::ai::provider::ReasoningMode;
 use crate::app_info::{DEFAULT_HOTKEY, DEFAULT_MODEL};
 
 pub const SETTINGS_VERSION: u32 = 1;
+pub const MAX_RECENT_CUSTOM_INSTRUCTIONS: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -20,6 +21,8 @@ pub struct Settings {
     pub history_enabled: bool,
     pub auto_run_action: Option<String>,
     pub dialect: String,
+    pub recent_custom_instructions: Vec<String>,
+    pub welcome_completed: bool,
 }
 
 impl Default for Settings {
@@ -34,6 +37,8 @@ impl Default for Settings {
             history_enabled: true,
             auto_run_action: None,
             dialect: "american".to_string(),
+            recent_custom_instructions: Vec::new(),
+            welcome_completed: false,
         }
     }
 }
@@ -45,6 +50,20 @@ impl Settings {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(&self.model)
+    }
+
+    /// Remembers the last 5 distinct custom instructions (newest first).
+    pub fn push_recent_custom_instruction(&mut self, instruction: &str) {
+        let trimmed = instruction.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.recent_custom_instructions
+            .retain(|existing| !existing.eq_ignore_ascii_case(trimmed));
+        self.recent_custom_instructions
+            .insert(0, trimmed.to_string());
+        self.recent_custom_instructions
+            .truncate(MAX_RECENT_CUSTOM_INSTRUCTIONS);
     }
 }
 
@@ -81,6 +100,9 @@ pub fn load_from_path(path: &Path) -> LoadedSettings {
                 if parsed.model.trim().is_empty() {
                     parsed.model = DEFAULT_MODEL.to_string();
                 }
+                parsed
+                    .recent_custom_instructions
+                    .truncate(MAX_RECENT_CUSTOM_INSTRUCTIONS);
                 LoadedSettings {
                     settings: parsed,
                     recovered_from_corrupt: false,
@@ -197,5 +219,22 @@ mod tests {
         assert!(!path.exists());
         assert!(dir.join("settings.bad.json").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remembers_last_five_custom_instructions_deduplicated() {
+        let mut s = Settings::default();
+        for i in 1..=7 {
+            s.push_recent_custom_instruction(&format!("Prompt {i}"));
+        }
+        assert_eq!(
+            s.recent_custom_instructions,
+            vec!["Prompt 7", "Prompt 6", "Prompt 5", "Prompt 4", "Prompt 3"]
+        );
+        s.push_recent_custom_instruction("prompt 4");
+        assert_eq!(
+            s.recent_custom_instructions,
+            vec!["prompt 4", "Prompt 7", "Prompt 6", "Prompt 5", "Prompt 3"]
+        );
     }
 }
