@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+/*
+ * Single source of truth for visual design tokens (light and dark).
+ * Components consume these tokens via Tailwind utility classes only so
+ * the later visual design pass can restyle the entire app in one file.
+ */
+:root {
+  color-scheme: light dark;
+
+  --surface-canvas: #ffffff;
+  --surface-elevated: #f5f5f7;
+  --surface-hover: #eaecef;
+
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #71717a;
+
+  --border-subtle: #e4e4e7;
+  --border-strong: #d4d4d8;
+
+  --accent-primary: #dc2626;
+  --accent-hover: #b91c1c;
+  --accent-contrast: #ffffff;
+
+  --status-error: #dc2626;
+  --status-warning: #d97706;
+  --status-info: #2563eb;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-canvas: #18181b;
+    --surface-elevated: #27272a;
+    --surface-hover: #3f3f46;
+
+    --text-primary: #f4f4f5;
+    --text-secondary: #a1a1aa;
+    --text-muted: #71717a;
+
+    --border-subtle: #3f3f46;
+    --border-strong: #52525b;
+
+    --accent-primary: #ef4444;
+    --accent-hover: #dc2626;
+    --accent-contrast: #ffffff;
+
+    --status-error: #f87171;
+    --status-warning: #fbbf24;
+    --status-info: #60a5fa;
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--surface-canvas);
+  --color-elevated: var(--surface-elevated);
+  --color-hover: var(--surface-hover);
+
+  --color-ink: var(--text-primary);
+  --color-ink-secondary: var(--text-secondary);
+  --color-ink-muted: var(--text-muted);
+
+  --color-line: var(--border-subtle);
+  --color-line-strong: var(--border-strong);
+
+  --color-accent: var(--accent-primary);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-contrast: var(--accent-contrast);
+
+  --color-status-error: var(--status-error);
+  --color-status-warning: var(--status-warning);
+  --color-status-info: var(--status-info);
+
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", Consolas, ui-monospace, monospace;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background-color: var(--surface-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}

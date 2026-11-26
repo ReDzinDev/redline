@@ -1,0 +1,11 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 100,
+  "tabWidth": 2,
+  "singleQuote": false,
+  "trailingComma": "all",
+  "sortTailwindcss": {
+    "stylesheet": "./src/styles/tokens.css"
+  },
+  "ignorePatterns": ["dist/**", "src-tauri/**", "pnpm-lock.yaml"]
+}
