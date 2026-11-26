@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::ai::prompts::{Action, Tone};
 use crate::ai::provider::{AiError, ReasoningMode};
 use crate::settings::Settings;
 
@@ -12,6 +13,7 @@ pub struct AppStatusDto {
     pub hotkey: String,
     pub hotkey_conflict: Option<String>,
     pub settings_recovered: bool,
+    pub welcome_completed: bool,
 }
 
 /// Settings snapshot exposed to the frontend.
@@ -25,6 +27,8 @@ pub struct SettingsDto {
     pub history_enabled: bool,
     pub auto_run_action: Option<String>,
     pub dialect: String,
+    pub recent_custom_instructions: Vec<String>,
+    pub welcome_completed: bool,
 }
 
 impl From<&Settings> for SettingsDto {
@@ -37,6 +41,8 @@ impl From<&Settings> for SettingsDto {
             history_enabled: s.history_enabled,
             auto_run_action: s.auto_run_action.clone(),
             dialect: s.dialect.clone(),
+            recent_custom_instructions: s.recent_custom_instructions.clone(),
+            welcome_completed: s.welcome_completed,
         }
     }
 }
@@ -88,4 +94,114 @@ impl From<AiError> for ApiErrorDto {
             retry_after_secs: err.retry_after_secs(),
         }
     }
+}
+
+/// Events emitted from Rust to the inline popup window (`popup:session`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "phase", rename_all = "camelCase")]
+pub enum PopupSessionEvent {
+    #[serde(rename_all = "camelCase")]
+    Capturing { session_id: u64, source_app: String },
+    #[serde(rename_all = "camelCase")]
+    Ready {
+        session_id: u64,
+        source_app: String,
+        text: String,
+        recent_custom_instructions: Vec<String>,
+        auto_run_action: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Error {
+        session_id: u64,
+        source_app: String,
+        error_code: String,
+    },
+}
+
+/// Action invocation payload sent from the UI to `rewrite_text`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionRequestDto {
+    pub kind: String,
+    pub tone: Option<String>,
+    pub custom_instruction: Option<String>,
+}
+
+impl ActionRequestDto {
+    pub fn into_action(self) -> Result<Action, ApiErrorDto> {
+        match self.kind.as_str() {
+            "improve" => Ok(Action::Improve),
+            "fix_grammar" => Ok(Action::FixGrammar),
+            "shorten" => Ok(Action::Shorten),
+            "make_clearer" => Ok(Action::MakeClearer),
+            "change_tone" => {
+                let tone = match self.tone.as_deref() {
+                    Some("professional") => Tone::Professional,
+                    Some("friendly") => Tone::Friendly,
+                    Some("casual") => Tone::Casual,
+                    Some("confident") => Tone::Confident,
+                    _ => {
+                        return Err(ApiErrorDto::new(
+                            "invalid_action",
+                            Some("Invalid tone".to_string()),
+                        ));
+                    }
+                };
+                Ok(Action::ChangeTone(tone))
+            }
+            "custom" => {
+                let instruction = self
+                    .custom_instruction
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        ApiErrorDto::new(
+                            "invalid_action",
+                            Some("Custom instruction cannot be empty".to_string()),
+                        )
+                    })?;
+                Ok(Action::Custom(instruction.to_string()))
+            }
+            _ => Err(ApiErrorDto::new("invalid_action", None)),
+        }
+    }
+}
+
+/// Streaming events sent over a Tauri `Channel` during `rewrite_text`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "camelCase")]
+pub enum RewriteStreamEvent {
+    #[serde(rename_all = "camelCase")]
+    Delta { request_id: u64, text: String },
+    #[serde(rename_all = "camelCase")]
+    Complete {
+        request_id: u64,
+        text: String,
+        model_used: String,
+        cost_usd: Option<f64>,
+        elapsed_ms: u64,
+        unchanged: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    CutOff {
+        request_id: u64,
+        partial_text: String,
+        detail: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Error { request_id: u64, error: ApiErrorDto },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptResultDto {
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingEditorDraft {
+    pub text: String,
+    pub source_app: Option<String>,
 }

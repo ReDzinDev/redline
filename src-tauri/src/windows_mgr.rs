@@ -1,6 +1,16 @@
-use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
-use crate::app_info::{APP_NAME, DEV_HOST, DEV_PORT, MAIN_ENTRY, WINDOW_MAIN};
+use tauri::{
+    AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+};
+
+use crate::AppState;
+use crate::app_info::{
+    APP_NAME, DEV_HOST, DEV_PORT, MAIN_ENTRY, POPUP_COMPACT_HEIGHT_LOGICAL, POPUP_ENTRY,
+    POPUP_EXPANDED_HEIGHT_LOGICAL, POPUP_WIDTH_LOGICAL, WINDOW_MAIN, WINDOW_POPUP,
+};
+use crate::platform::placement;
 
 /// Navigation guard: rejects any URL that does not belong to Redline's own app origin.
 /// CSP cannot prevent top-level navigation, so every webview attaches this check.
@@ -52,6 +62,193 @@ pub fn open_or_focus_main(app: &AppHandle) -> tauri::Result<()> {
         .build()?;
 
     Ok(())
+}
+
+/// Pre-creates the frameless inline popup window hidden at startup so hotkey-to-popup is instant.
+/// Disables WebView2 browser accelerator keys and enables low-memory mode while hidden.
+pub fn precreate_popup(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    let window = WebviewWindowBuilder::new(app, WINDOW_POPUP, WebviewUrl::App(POPUP_ENTRY.into()))
+        .title(APP_NAME)
+        .visible(false)
+        .decorations(false)
+        .transparent(false)
+        .shadow(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .inner_size(POPUP_WIDTH_LOGICAL, POPUP_COMPACT_HEIGHT_LOGICAL)
+        .on_navigation(|url| {
+            let allowed = is_allowed_app_url(url);
+            if !allowed {
+                log::warn!(
+                    "blocked popup navigation to disallowed scheme={}",
+                    url.scheme()
+                );
+            }
+            allowed
+        })
+        .build()?;
+
+    configure_popup_webview(&window);
+
+    let app_handle = app.clone();
+    window.on_window_event(move |event| match event {
+        WindowEvent::CloseRequested { api, .. } => {
+            // Keep pre-created popup alive; hiding puts it back in low-memory mode.
+            api.prevent_close();
+            crate::cancel_inflight(&app_handle.state::<AppState>(), WINDOW_POPUP);
+            hide_popup(&app_handle);
+        }
+        WindowEvent::Focused(false) => {
+            let state = app_handle.state::<AppState>();
+            if state.should_dismiss_on_blur() {
+                crate::cancel_inflight(&state, WINDOW_POPUP);
+                hide_popup(&app_handle);
+                *state
+                    .active_capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            }
+        }
+        _ => {}
+    });
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn configure_popup_webview(window: &WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, ICoreWebView2_19, ICoreWebView2Settings3,
+    };
+    use windows::core::Interface;
+
+    let _ = window.with_webview(|wv| unsafe {
+        let controller = wv.controller();
+        if let Ok(core) = controller.CoreWebView2() {
+            if let Ok(settings) = core.Settings()
+                && let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>()
+                && let Err(err) = settings3.SetAreBrowserAcceleratorKeysEnabled(false)
+            {
+                log::warn!("failed disabling WebView2 accelerator keys: {err}");
+            }
+            if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+                let _ = wv19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn configure_popup_webview(_window: &WebviewWindow) {}
+
+#[cfg(windows)]
+pub fn set_popup_low_memory(window: &WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        ICoreWebView2_19,
+    };
+    use windows::core::Interface;
+
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    let _ = window.with_webview(move |wv| unsafe {
+        if let Ok(core) = wv.controller().CoreWebView2()
+            && let Ok(wv19) = core.cast::<ICoreWebView2_19>()
+        {
+            let _ = wv19.SetMemoryUsageTargetLevel(level);
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn set_popup_low_memory(_window: &WebviewWindow, _low: bool) {}
+
+/// Positions the popup at the cursor (DPI-aware, clamped to monitor work area) and shows it
+/// WITHOUT activating it so the target app keeps focus during UIA/Ctrl+C capture.
+pub fn show_popup_for_capture(app: &AppHandle) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window(WINDOW_POPUP) else {
+        return Ok(());
+    };
+
+    let state = app.state::<AppState>();
+    state.popup_visible.store(true, Ordering::SeqCst);
+    state.popup_capturing.store(true, Ordering::SeqCst);
+    set_popup_low_memory(&window, false);
+
+    if let (Ok(hwnd), Some((cx, cy, work))) = (window.hwnd(), placement::cursor_monitor_work_area())
+    {
+        let rect = placement::compute_popup_rect(
+            cx,
+            cy,
+            &work,
+            POPUP_WIDTH_LOGICAL,
+            POPUP_COMPACT_HEIGHT_LOGICAL,
+            POPUP_EXPANDED_HEIGHT_LOGICAL,
+        );
+        placement::show_window_no_activate(hwnd.0 as isize, rect);
+    } else {
+        window.show()?;
+    }
+
+    Ok(())
+}
+
+/// Activates the popup after capture completes and records the timestamp for blur-grace handling.
+pub fn activate_popup_after_capture(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    *state
+        .popup_activated_at
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+    state.popup_capturing.store(false, Ordering::SeqCst);
+
+    if let Some(window) = app.get_webview_window(WINDOW_POPUP) {
+        let _ = window.set_focus();
+    }
+}
+
+/// Switches popup between compact (460x320) and expanded (460x520) clamped to its current monitor.
+pub fn resize_popup(app: &AppHandle, expanded: bool) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window(WINDOW_POPUP) else {
+        return Ok(());
+    };
+
+    let target_h = if expanded {
+        POPUP_EXPANDED_HEIGHT_LOGICAL
+    } else {
+        POPUP_COMPACT_HEIGHT_LOGICAL
+    };
+
+    if let Ok(hwnd) = window.hwnd()
+        && let Some((current_rect, work)) = placement::window_rect_and_work_area(hwnd.0 as isize)
+    {
+        let next = placement::compute_resized_rect(
+            current_rect.left,
+            current_rect.top,
+            &work,
+            POPUP_WIDTH_LOGICAL,
+            target_h,
+        );
+        placement::move_resize_topmost(hwnd.0 as isize, next);
+    }
+
+    Ok(())
+}
+
+/// Hides the popup and switches its WebView2 back into low-memory mode.
+pub fn hide_popup(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.popup_visible.store(false, Ordering::SeqCst);
+    state.popup_capturing.store(false, Ordering::SeqCst);
+
+    if let Some(window) = app.get_webview_window(WINDOW_POPUP) {
+        let _ = window.hide();
+        set_popup_low_memory(&window, true);
+    }
 }
 
 #[cfg(test)]

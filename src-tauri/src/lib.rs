@@ -9,31 +9,74 @@ mod settings;
 mod tray;
 mod windows_mgr;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
-use crate::ai::chat_client::ChatClient;
-use crate::ai::models::reasoning_mode_for_model;
-use crate::ai::prompts::{Action, build_prompt, postprocess_reply};
-use crate::ai::provider::{ChatRequest, Provider};
-use crate::capture::{PasteOutcome, PlatformWorker};
+use crate::ai::prompts::{LineEnding, normalize_line_endings};
+use crate::app_info::WINDOW_POPUP;
+use crate::capture::PlatformWorker;
+use crate::dto::{PendingEditorDraft, PopupSessionEvent};
+use crate::platform::focus::TargetWindow;
 use crate::settings::Settings;
+
+const BLUR_DISMISS_GRACE: Duration = Duration::from_millis(200);
+
+/// Holds the active inline capture target for the currently open popup session.
+pub struct ActiveCapture {
+    pub target: TargetWindow,
+    pub original_line_ending: LineEnding,
+}
 
 /// Shared application state managed by Tauri.
 pub struct AppState {
     pub quitting: AtomicBool,
-    pub bare_loop_busy: AtomicBool,
+    pub popup_visible: AtomicBool,
+    pub popup_capturing: AtomicBool,
+    pub popup_activated_at: Mutex<Option<Instant>>,
+    pub session_counter: AtomicU64,
+    pub active_capture: Mutex<Option<ActiveCapture>>,
+    pub pending_editor_draft: Mutex<Option<PendingEditorDraft>>,
+    pub inflight_rewrites: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
     pub settings: Mutex<Settings>,
     pub settings_path: PathBuf,
     pub settings_recovered: bool,
     pub hotkey_conflict: Mutex<Option<String>>,
     pub worker: PlatformWorker,
+}
+
+impl AppState {
+    pub fn should_dismiss_on_blur(&self) -> bool {
+        if !self.popup_visible.load(Ordering::SeqCst) || self.popup_capturing.load(Ordering::SeqCst)
+        {
+            return false;
+        }
+        let activated = *self
+            .popup_activated_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match activated {
+            Some(at) => at.elapsed() >= BLUR_DISMISS_GRACE,
+            None => true,
+        }
+    }
+}
+
+pub fn cancel_inflight(state: &AppState, window_id: &str) {
+    if let Some(handle) = state
+        .inflight_rewrites
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(window_id)
+    {
+        handle.abort();
+    }
 }
 
 fn install_panic_hook() {
@@ -71,200 +114,164 @@ fn build_log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-struct BusyReset {
-    app: AppHandle,
-}
-
-impl Drop for BusyReset {
-    fn drop(&mut self) {
-        self.app
-            .state::<AppState>()
-            .bare_loop_busy
-            .store(false, Ordering::SeqCst);
-    }
-}
-
-/// Milestone 1 bare loop (no popup yet):
-/// Hotkey -> capture selection -> OpenRouter "Fix grammar" -> paste back with clipboard restore.
+/// Milestone 2 inline popup flow:
+/// 1. If popup is already open -> toggle it closed and restore focus.
+/// 2. If platform worker is busy -> ignore.
+/// 3. Record foreground window, show popup at cursor WITHOUT activating in "Capturing..." state.
+/// 4. Capture selection on MTA COM worker thread (UIA first, clipboard fallback).
+/// 5. Activate popup and emit captured text (or structured error code).
 fn on_hotkey_pressed(app: &AppHandle) {
     let state = app.state::<AppState>();
-    if state.worker.is_busy()
-        || state
-            .bare_loop_busy
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-    {
-        log::debug!("ignoring hotkey while capture or rewrite is in flight");
+
+    // Toggle closed if the popup is already visible.
+    if state.popup_visible.load(Ordering::SeqCst) {
+        cancel_inflight(&state, WINDOW_POPUP);
+        windows_mgr::hide_popup(app);
+        let active = state
+            .active_capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(capture) = active {
+            let focus_app = app.clone();
+            let target = capture.target;
+            tauri::async_runtime::spawn_blocking(move || {
+                focus_app.state::<AppState>().worker.restore_focus(target);
+            });
+        }
         return;
     }
 
+    if state.worker.is_busy() {
+        log::debug!("ignoring hotkey while platform worker is busy");
+        return;
+    }
+
+    let started = Instant::now();
     let Some(target) = platform::focus::capture_foreground_window() else {
         log::debug!("hotkey pressed with no active foreground window");
-        state.bare_loop_busy.store(false, Ordering::SeqCst);
         return;
     };
 
-    let app_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _busy_guard = BusyReset {
-            app: app_handle.clone(),
-        };
-        run_bare_loop(app_handle, target).await;
-    });
-}
+    let session_id = state.session_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let source_app = target.process_name.clone();
 
-async fn run_bare_loop(app: AppHandle, target: platform::focus::TargetWindow) {
-    let started = Instant::now();
-    let target_proc = target.process_name.clone();
-
-    let capture_app = app.clone();
-    let captured = match tauri::async_runtime::spawn_blocking(move || {
-        capture_app
-            .state::<AppState>()
-            .worker
-            .capture_selection(target)
-    })
-    .await
-    {
-        Ok(Ok(sel)) => sel,
-        Ok(Err(err)) => {
-            log::info!(
-                "capture did not complete: code={} app={} elapsed_ms={}",
-                err.code(),
-                target_proc,
-                started.elapsed().as_millis()
-            );
-            return;
-        }
-        Err(err) => {
-            log::error!("capture task join error: {err}");
-            return;
-        }
-    };
+    if let Err(err) = windows_mgr::show_popup_for_capture(app) {
+        log::error!("failed showing popup for capture: {err}");
+        return;
+    }
 
     log::info!(
-        "captured selection: method={:?} app={} chars={} elapsed_ms={}",
-        captured.method,
-        captured.target.process_name,
-        captured.text.chars().count(),
+        "popup shown (capturing): session={} app={} hotkey_to_popup_ms={}",
+        session_id,
+        source_app,
         started.elapsed().as_millis()
     );
 
-    let api_key = match secrets::get_api_key() {
-        Ok(Some(key)) => key,
-        Ok(None) => {
-            log::info!("no OpenRouter API key configured; opening Settings");
-            let _ = windows_mgr::open_or_focus_main(&app);
-            return;
-        }
-        Err(err) => {
-            log::error!("credential store read failed: {err}");
-            let _ = windows_mgr::open_or_focus_main(&app);
-            return;
-        }
-    };
-
-    let (model_id, reasoning, deny_data_collection) = {
-        let state = app.state::<AppState>();
-        let guard = state
-            .settings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let model = guard.active_model_id().to_string();
-        let reasoning = reasoning_mode_for_model(&model, guard.custom_model_reasoning.as_ref());
-        (model, reasoning, guard.deny_data_collection)
-    };
-
-    let client = match ChatClient::openrouter(api_key, deny_data_collection) {
-        Ok(c) => c,
-        Err(err) => {
-            log::error!("failed to build OpenRouter client: code={}", err.code());
-            return;
-        }
-    };
-
-    let built = build_prompt(&Action::FixGrammar, &captured.text);
-    let req = ChatRequest {
-        model: model_id.clone(),
-        system: built.system.clone(),
-        user: built.user.clone(),
-        max_tokens: built.max_tokens,
-        reasoning,
-    };
-
-    let ai_started = Instant::now();
-    let completion = match client.stream(req, |_| {}).await {
-        Ok(done) => done,
-        Err(err) => {
-            log::warn!(
-                "AI rewrite failed: code={} model={} elapsed_ms={}",
-                err.code(),
-                model_id,
-                ai_started.elapsed().as_millis()
-            );
-            return;
-        }
-    };
-
-    let cleaned = postprocess_reply(&completion.text, &built);
-    log::info!(
-        "AI rewrite complete: model={} finish={} cost_usd={:?} reasoning_tokens={:?} out_chars={} ai_ms={}",
-        completion.model_used,
-        completion.finish_reason,
-        completion.cost_usd,
-        completion.reasoning_tokens,
-        cleaned.chars().count(),
-        ai_started.elapsed().as_millis()
+    let _ = app.emit_to(
+        WINDOW_POPUP,
+        "popup:session",
+        PopupSessionEvent::Capturing {
+            session_id,
+            source_app: source_app.clone(),
+        },
     );
 
-    if cleaned == captured.text {
-        log::info!(
-            "rewrite unchanged; restoring focus without pasting (total_ms={})",
-            started.elapsed().as_millis()
-        );
-        let target_for_focus = captured.target;
-        let focus_app = app.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            focus_app
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let capture_app = app_handle.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            capture_app
                 .state::<AppState>()
                 .worker
-                .restore_focus(target_for_focus)
+                .capture_selection(target)
         })
         .await;
-        return;
-    }
 
-    let paste_app = app.clone();
-    let target_for_paste = captured.target;
-    match tauri::async_runtime::spawn_blocking(move || {
-        paste_app
-            .state::<AppState>()
-            .worker
-            .paste_result(target_for_paste, cleaned)
-    })
-    .await
-    {
-        Ok(Ok(PasteOutcome::Pasted { rendered })) => {
-            log::info!(
-                "paste complete: rendered={} app={} total_ms={}",
-                rendered,
-                target_proc,
-                started.elapsed().as_millis()
-            );
+        let state = app_handle.state::<AppState>();
+        // If user dismissed popup before capture finished, ignore stale result.
+        if !state.popup_visible.load(Ordering::SeqCst)
+            || state.session_counter.load(Ordering::SeqCst) != session_id
+        {
+            return;
         }
-        Ok(Ok(PasteOutcome::CopiedFallback)) => {
-            log::warn!(
-                "focus could not be restored to {}; result copied to clipboard",
-                target_proc
-            );
+
+        match result {
+            Ok(Ok(captured)) => {
+                let (normalized_text, original_line_ending) =
+                    normalize_line_endings(&captured.text);
+                let (recent_custom_instructions, auto_run_action) = {
+                    let guard = state
+                        .settings
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        guard.recent_custom_instructions.clone(),
+                        guard.auto_run_action.clone(),
+                    )
+                };
+
+                log::info!(
+                    "capture ready: session={} method={:?} app={} chars={} elapsed_ms={}",
+                    session_id,
+                    captured.method,
+                    captured.target.process_name,
+                    normalized_text.chars().count(),
+                    started.elapsed().as_millis()
+                );
+
+                *state
+                    .active_capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActiveCapture {
+                    target: captured.target,
+                    original_line_ending,
+                });
+
+                windows_mgr::activate_popup_after_capture(&app_handle);
+
+                let _ = app_handle.emit_to(
+                    WINDOW_POPUP,
+                    "popup:session",
+                    PopupSessionEvent::Ready {
+                        session_id,
+                        source_app,
+                        text: normalized_text,
+                        recent_custom_instructions,
+                        auto_run_action,
+                    },
+                );
+            }
+            Ok(Err(err)) => {
+                log::info!(
+                    "capture ended with error: session={} code={} app={} elapsed_ms={}",
+                    session_id,
+                    err.code(),
+                    source_app,
+                    started.elapsed().as_millis()
+                );
+                *state
+                    .active_capture
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                windows_mgr::activate_popup_after_capture(&app_handle);
+
+                let _ = app_handle.emit_to(
+                    WINDOW_POPUP,
+                    "popup:session",
+                    PopupSessionEvent::Error {
+                        session_id,
+                        source_app,
+                        error_code: err.code().to_string(),
+                    },
+                );
+            }
+            Err(err) => {
+                log::error!("capture task join error: {err}");
+                windows_mgr::hide_popup(&app_handle);
+            }
         }
-        Ok(Err(err)) => {
-            log::warn!("paste failed: code={} app={}", err.code(), target_proc);
-        }
-        Err(err) => {
-            log::error!("paste task join error: {err}");
-        }
-    }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -297,6 +304,15 @@ pub fn run() {
             commands::test_api_key,
             commands::save_model,
             commands::save_privacy,
+            commands::rewrite_text,
+            commands::cancel_rewrite,
+            commands::resize_popup,
+            commands::accept_popup_result,
+            commands::dismiss_popup,
+            commands::copy_to_clipboard,
+            commands::open_in_editor,
+            commands::open_settings,
+            commands::take_editor_draft,
         ])
         .setup(|app| {
             if let Err(err) = secrets::init_store() {
@@ -322,7 +338,13 @@ pub fn run() {
 
             app.manage(AppState {
                 quitting: AtomicBool::new(false),
-                bare_loop_busy: AtomicBool::new(false),
+                popup_visible: AtomicBool::new(false),
+                popup_capturing: AtomicBool::new(false),
+                popup_activated_at: Mutex::new(None),
+                session_counter: AtomicU64::new(0),
+                active_capture: Mutex::new(None),
+                pending_editor_draft: Mutex::new(None),
+                inflight_rewrites: Mutex::new(HashMap::new()),
                 settings: Mutex::new(loaded.settings),
                 settings_path: path,
                 settings_recovered: loaded.recovered_from_corrupt,
@@ -330,6 +352,8 @@ pub fn run() {
                 worker,
             });
 
+            // Pre-create hidden popup window for instant hotkey response.
+            windows_mgr::precreate_popup(app.handle())?;
             tray::setup(app)?;
 
             if open_settings_on_start {
