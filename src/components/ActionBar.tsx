@@ -27,7 +27,7 @@ export function ActionBar({
   onRunCustom,
 }: ActionBarProps) {
   return (
-    <div className="space-y-2">
+    <div className="shrink-0 space-y-2">
       <div className="flex flex-wrap gap-1.5" role="toolbar" aria-label={MESSAGES.a11y.aiActions}>
         {MESSAGES.actions.map((item) => {
           const isSelected =

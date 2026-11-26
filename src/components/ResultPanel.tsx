@@ -111,7 +111,7 @@ export function ResultPanel({
     return (
       <section
         role="alert"
-        className="flex min-h-0 flex-1 flex-col gap-2 rounded-md border border-status-warning bg-elevated p-3 text-xs"
+        className="flex min-h-40 flex-1 shrink-0 flex-col gap-2 rounded-md border border-status-warning bg-elevated p-3 text-xs"
       >
         <div className="flex items-center justify-between gap-2">
           <p className="font-medium text-ink">{MESSAGES.popup.cutOffHeadline}</p>
@@ -154,7 +154,7 @@ export function ResultPanel({
   return (
     <section
       aria-busy={result.status === "streaming"}
-      className="flex min-h-0 flex-1 flex-col gap-2 rounded-md border border-line bg-elevated p-3"
+      className="flex min-h-44 flex-1 shrink-0 flex-col gap-2 rounded-md border border-line bg-elevated p-3"
     >
       <div className="flex items-center justify-between gap-2 text-xs text-ink-secondary">
         <span className="font-medium text-ink">
@@ -183,6 +183,7 @@ export function ResultPanel({
             )}
             <button
               type="button"
+              title={MESSAGES.popup.copyTitle}
               onClick={() => onCopy(result.text)}
               className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
@@ -191,6 +192,7 @@ export function ResultPanel({
             {onPasteResult && !result.unchanged && (
               <button
                 type="button"
+                title={MESSAGES.popup.replaceTitle}
                 onClick={onPasteResult}
                 className="rounded-sm bg-accent px-2 py-0.5 text-2xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
               >
@@ -210,7 +212,7 @@ export function ResultPanel({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-sm border border-line bg-canvas p-2.5 select-text">
+      <div className="min-h-32 flex-1 overflow-y-auto rounded-sm border border-line bg-canvas p-2.5 select-text">
         {result.status === "complete" && showDiff && !result.unchanged ? (
           <DiffView original={originalText} modified={result.text} />
         ) : (

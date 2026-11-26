@@ -9,6 +9,8 @@ interface LintCardListProps {
   ignoredIds: ReadonlySet<string>;
   canUndo: boolean;
   highlightedLintId?: string | null;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
   onApply: (lint: LintDto, suggestion: SuggestionDto) => void;
   onIgnore: (lintId: string) => void;
   onFixAll: () => void;
@@ -23,6 +25,8 @@ export function LintCardList({
   ignoredIds,
   canUndo,
   highlightedLintId,
+  collapsed = false,
+  onToggleCollapse,
   onApply,
   onIgnore,
   onFixAll,
@@ -57,13 +61,25 @@ export function LintCardList({
   }
 
   return (
-    <section aria-label={MESSAGES.grammar.sectionLabel} className="space-y-1.5">
+    <section aria-label={MESSAGES.grammar.sectionLabel} className="shrink-0 space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-2xs font-medium text-ink-secondary">
-          {visible.length > 0
-            ? MESSAGES.grammar.issuesCount(visible.length + overflowCount)
-            : MESSAGES.grammar.noIssues}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-2xs font-medium text-ink-secondary">
+            {visible.length > 0
+              ? MESSAGES.grammar.issuesCount(visible.length + overflowCount)
+              : MESSAGES.grammar.noIssues}
+          </span>
+          {onToggleCollapse && visible.length > 0 && (
+            <button
+              type="button"
+              aria-expanded={!collapsed}
+              onClick={onToggleCollapse}
+              className="rounded-sm border border-line bg-canvas px-1.5 py-0.5 text-2xs font-medium text-ink-secondary transition hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {collapsed ? MESSAGES.grammar.showSuggestions : MESSAGES.grammar.hideSuggestions}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-1.5">
           {canUndo && (
             <button
@@ -87,7 +103,7 @@ export function LintCardList({
         </div>
       </div>
 
-      {visible.length > 0 && (
+      {visible.length > 0 && !collapsed && (
         <div ref={listRef} className="max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
           {visible.map((lint, idx) => {
             const isHighlighted = highlightedLintId === lint.id;

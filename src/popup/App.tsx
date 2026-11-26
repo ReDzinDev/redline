@@ -88,6 +88,7 @@ export function PopupApp() {
   const [ignoredIds, setIgnoredIds] = useState<Set<string>>(() => new Set());
   const [undoStack, setUndoStack] = useState<string[]>([]);
   const [highlightedLintId, setHighlightedLintId] = useState<string | null>(null);
+  const [lintsExpandedDuringResult, setLintsExpandedDuringResult] = useState(false);
 
   const aiRequestIdRef = useRef(0);
   const lintRequestIdRef = useRef(0);
@@ -127,6 +128,7 @@ export function PopupApp() {
     setShowDiff(false);
     setCopied(false);
     setLiveAnnouncement("");
+    setLintsExpandedDuringResult(false);
     setResult({
       ...INITIAL_RESULT,
       status: "streaming",
@@ -203,8 +205,10 @@ export function PopupApp() {
       setIgnoredIds(new Set());
       setUndoStack([]);
       setHighlightedLintId(null);
+      setLintsExpandedDuringResult(false);
 
       if (evt.phase === "capturing") {
+        expandedRef.current = false;
         setPhase("capturing");
         setSourceApp(evt.sourceApp);
         setInitialText("");
@@ -532,23 +536,38 @@ export function PopupApp() {
       {phase === "error" && (
         <div className="flex flex-1 flex-col items-start justify-center gap-3 p-2">
           <p className="text-sm text-ink">{formatCaptureError(captureErrorCode ?? "")}</p>
-          <button
-            type="button"
-            onClick={() => openInEditor().catch(() => {})}
-            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-contrast transition hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            {MESSAGES.popup.openInEditor}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => openInEditor().catch(() => {})}
+              className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-accent-contrast transition hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.popup.openInEditor}
+            </button>
+            <button
+              type="button"
+              onClick={() => dismissPopup(true).catch(() => {})}
+              className="rounded-md border border-line-strong bg-canvas px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.popup.closeLabel}
+            </button>
+          </div>
         </div>
       )}
 
       {phase === "ready" && (
-        <div className="flex min-h-0 flex-1 flex-col gap-2">
+        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-0.5">
           <UnderlinedText
             text={text}
             lints={lints}
             ignoredIds={ignoredIds}
-            onSelectLint={(lint) => setHighlightedLintId(lint.id)}
+            compact={result.status !== "idle"}
+            onSelectLint={(lint) => {
+              setHighlightedLintId(lint.id);
+              if (result.status !== "idle") {
+                setLintsExpandedDuringResult(true);
+              }
+            }}
           />
 
           <LintCardList
@@ -558,6 +577,12 @@ export function PopupApp() {
             ignoredIds={ignoredIds}
             canUndo={undoStack.length > 0}
             highlightedLintId={highlightedLintId}
+            collapsed={result.status !== "idle" && !lintsExpandedDuringResult}
+            onToggleCollapse={
+              result.status !== "idle"
+                ? () => setLintsExpandedDuringResult((prev) => !prev)
+                : undefined
+            }
             onApply={handleApplyLint}
             onIgnore={handleIgnoreLint}
             onFixAll={handleFixAll}
@@ -601,14 +626,25 @@ export function PopupApp() {
           />
 
           {fallbackNotice && (
-            <p
+            <div
               role={fallbackNotice.kind === "error" ? "alert" : "status"}
-              className={`text-xs font-medium ${
-                fallbackNotice.kind === "error" ? "text-status-error" : "text-status-info"
-              }`}
+              className="flex shrink-0 items-center justify-between gap-2 rounded-md border border-line bg-elevated px-2.5 py-1.5 text-xs"
             >
-              {fallbackNotice.text}
-            </p>
+              <p
+                className={`font-medium ${
+                  fallbackNotice.kind === "error" ? "text-status-error" : "text-status-info"
+                }`}
+              >
+                {fallbackNotice.text}
+              </p>
+              <button
+                type="button"
+                onClick={() => dismissPopup(false).catch(() => {})}
+                className="shrink-0 rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {MESSAGES.popup.closeLabel}
+              </button>
+            </div>
           )}
         </div>
       )}

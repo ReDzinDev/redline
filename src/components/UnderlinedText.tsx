@@ -5,6 +5,7 @@ interface UnderlinedTextProps {
   text: string;
   lints: LintDto[];
   ignoredIds: ReadonlySet<string>;
+  compact?: boolean;
   onSelectLint?: (lint: LintDto) => void;
 }
 
@@ -19,11 +20,19 @@ function underlineClasses(category: LintCategory): string {
   }
 }
 
-export function UnderlinedText({ text, lints, ignoredIds, onSelectLint }: UnderlinedTextProps) {
+export function UnderlinedText({
+  text,
+  lints,
+  ignoredIds,
+  compact = false,
+  onSelectLint,
+}: UnderlinedTextProps) {
   const segments = buildUnderlinedSegments(text, lints, ignoredIds);
 
   return (
-    <div className="max-h-24 overflow-y-auto rounded-md border border-line bg-elevated px-2.5 py-2 text-xs leading-relaxed whitespace-pre-wrap text-ink select-text">
+    <div
+      className={`${compact ? "max-h-16" : "max-h-24"} shrink-0 overflow-y-auto rounded-md border border-line bg-elevated px-2.5 py-2 text-xs leading-relaxed whitespace-pre-wrap text-ink select-text`}
+    >
       {segments.map((seg, idx) =>
         seg.lint ? (
           <button
