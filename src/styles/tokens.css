@@ -26,6 +26,11 @@
   --status-error: #dc2626;
   --status-warning: #d97706;
   --status-info: #2563eb;
+
+  --diff-added-bg: #dcfce7;
+  --diff-added-ink: #166534;
+  --diff-removed-bg: #fee2e2;
+  --diff-removed-ink: #991b1b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,6 +53,11 @@
     --status-error: #f87171;
     --status-warning: #fbbf24;
     --status-info: #60a5fa;
+
+    --diff-added-bg: #14532d;
+    --diff-added-ink: #bbf7d0;
+    --diff-removed-bg: #7f1d1d;
+    --diff-removed-ink: #fecaca;
   }
 }
 
@@ -70,6 +80,11 @@
   --color-status-error: var(--status-error);
   --color-status-warning: var(--status-warning);
   --color-status-info: var(--status-info);
+
+  --color-diff-added-bg: var(--diff-added-bg);
+  --color-diff-added-ink: var(--diff-added-ink);
+  --color-diff-removed-bg: var(--diff-removed-bg);
+  --color-diff-removed-ink: var(--diff-removed-ink);
 
   --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-mono: "Cascadia Code", Consolas, ui-monospace, monospace;

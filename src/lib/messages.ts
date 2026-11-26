@@ -9,6 +9,20 @@ export const MESSAGES = {
     name: "Redline",
     tagline: "Lightweight writing assistant running in your system tray.",
   },
+  tabs: {
+    write: "Write",
+    history: "History",
+    settings: "Settings",
+  },
+  welcome: {
+    heading: "Welcome to Redline",
+    hotkeySummary: (hotkey: string) =>
+      `Select text in any app and press ${hotkey} to check grammar or rewrite in place.`,
+    offlineReassurance: "Offline English grammar checking works right now — no API key needed.",
+    optionalKeyHeading: "Optional: Connect OpenRouter for AI rewrites",
+    startAtLogin: "Start Redline when I sign in to Windows",
+    doneButton: "Done",
+  },
   actions: [
     { key: "1", kind: "improve" as ActionKind, label: "Improve" },
     { key: "2", kind: "fix_grammar" as ActionKind, label: "Fix grammar" },
@@ -30,6 +44,13 @@ export const MESSAGES = {
     { value: "australian", label: "Australian English" },
     { value: "indian", label: "Indian English" },
   ],
+  autoRunOptions: [
+    { value: "", label: "Off (wait for key press)" },
+    { value: "improve", label: "Improve" },
+    { value: "fix_grammar", label: "Fix grammar" },
+    { value: "shorten", label: "Shorten" },
+    { value: "make_clearer", label: "Make clearer" },
+  ],
   grammar: {
     sectionLabel: "Grammar suggestions",
     checking: "Checking…",
@@ -38,10 +59,29 @@ export const MESSAGES = {
     undo: "Undo",
     ignore: "Ignore",
     noIssues: "No grammar issues",
+    harperHistoryAction: "Grammar fixes",
+    harperHistoryModel: "Harper",
     issuesCount: (n: number) => (n === 1 ? "1 suggestion" : `${n} suggestions`),
     moreCount: (n: number) => `+${n} more`,
     dialectLabel: "English dialect",
-    sectionTitle: "Grammar (Harper)",
+    sectionTitle: "Grammar",
+  },
+  write: {
+    placeholder: "Type or paste text to check grammar or run AI actions (Ctrl+1–Ctrl+6)…",
+    charLimitExceeded: "Over the 40,000-character limit for AI actions.",
+    useThis: "Use this",
+    clear: "Clear",
+    fromApp: (app: string) => `From ${app}`,
+  },
+  history: {
+    empty: "No rewrites or grammar fixes recorded yet.",
+    disabledNotice: "History is turned off in Settings. Turn it on to keep the last 20 entries.",
+    clearButton: "Clear history",
+    copyOriginal: "Copy original",
+    copyResult: "Copy result",
+    copied: "Copied",
+    showDiff: "Show diff",
+    hideDiff: "Hide diff",
   },
   popup: {
     capturing: "Capturing…",
@@ -49,9 +89,12 @@ export const MESSAGES = {
     closeLabel: "Close",
     openInEditor: "Open in editor",
     openSettings: "Open Settings",
+    openCredits: "Open OpenRouter credits",
     retry: "Retry",
     copy: "Copy",
     copied: "Copied",
+    resultTab: "Result",
+    diffTab: "Diff",
     copiedFallbackNotice: "Copied: paste it with Ctrl+V.",
     noChanges: "No changes",
     resultReadyAnnouncement: "Result ready",
@@ -65,6 +108,7 @@ export const MESSAGES = {
       close: "↵ Close",
       streaming: "Wait for the result or press Esc",
       cutOffOrError: "Retry or Copy · Esc Close",
+      diff: "D Diff",
       editor: "Ctrl+E Editor",
       esc: "Esc Close",
     },
@@ -79,17 +123,25 @@ export const MESSAGES = {
   },
   settings: {
     heading: "Settings",
-    bareLoopHint: (hotkey: string) =>
-      `Select text in any app and press ${hotkey} to open the inline popup. Close this window to return to the system tray.`,
-    hotkeyConflict: (hotkey: string) =>
-      `${hotkey} is used by another app. Pick another shortcut or close the conflicting app.`,
+    generalSectionTitle: "General",
+    hotkeyLabel: "Global hotkey",
+    hotkeyRecordButton: "Record shortcut",
+    hotkeyRecordingPrompt: "Press a shortcut (Esc to cancel)…",
+    hotkeyPausedNote: "Hotkey is currently paused from the tray menu.",
+    hotkeyConflict: (hotkey: string) => `${hotkey} is used by another app. Pick another shortcut.`,
+    autostartLabel: "Start at login",
+    historyEnabledLabel: "Save last 20 entries in History",
+    autoRunLabel: "Run this action automatically when the popup opens",
     settingsRecovered:
       "Your previous settings file couldn't be read, so defaults were restored (backup saved as settings.bad.json).",
-    aiSectionTitle: "AI (OpenRouter)",
+    historyRecovered:
+      "Your previous history file couldn't be read, so a fresh list was started (backup saved as history.bad.json).",
+    aiSectionTitle: "AI",
     apiKeyLabel: "OpenRouter API key",
     apiKeyPlaceholder: "sk-or-v1-…",
     apiKeySavedBadge: "Saved in Windows Credential Manager",
     apiKeyMissingBadge: "No key saved",
+    getKeyButton: "Get a key",
     saveKeyButton: "Save",
     removeKeyButton: "Remove",
     testKeyButton: "Test",
@@ -97,8 +149,19 @@ export const MESSAGES = {
     keySavedNotice: "Key saved to Windows Credential Manager.",
     keyRemovedNotice: "Key removed from Windows Credential Manager.",
     modelLabel: "Model",
+    customModelLabel: "Custom model ID (optional)",
+    customModelPlaceholder: "e.g. openai/gpt-6-luna",
+    customModelCheckButton: "Verify & use",
+    customModelCheckingButton: "Checking…",
+    customModelClearButton: "Use curated",
+    customModelSavedNotice: (id: string) => `Using custom model ${id}.`,
     privacyLabel: "Don't use providers that train on your text",
     privacyHelp: "Sends data_collection: deny to exclude providers that retain and train on text.",
+    aboutSectionTitle: "About",
+    versionLabel: (v: string) => `Redline v${v}`,
+    licensesText: "MIT License · Offline grammar powered by Harper (Apache-2.0).",
+    openLogFolderButton: "Open log folder",
+    repoLinkButton: "GitHub repository",
     formatKeyTestSuccess: (res: KeyTestResultDto): string => {
       const name = res.label ? `${res.label} · ` : "";
       const limit =
@@ -202,6 +265,12 @@ export function formatApiError(err: ApiErrorDto): {
         headline: "The model returned nothing.",
         detail: null,
         nextStep: "retry",
+      };
+    case "hotkey_conflict":
+      return {
+        headline: MESSAGES.settings.hotkeyConflict(err.detail ?? "That shortcut"),
+        detail: null,
+        nextStep: "none",
       };
     case "secret_store_error":
       return {

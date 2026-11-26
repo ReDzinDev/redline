@@ -1,6 +1,7 @@
 import type { ApiErrorDto } from "../lib/ipc";
 import { formatApiError, MESSAGES } from "../lib/messages";
 import { formatCostUsd, formatElapsedSeconds, type AiRunStatus } from "../lib/popupLogic";
+import { DiffView } from "./DiffView";
 
 export interface ResultState {
   status: AiRunStatus;
@@ -17,13 +18,29 @@ export interface ResultState {
 
 interface ResultPanelProps {
   result: ResultState;
+  originalText: string;
+  showDiff: boolean;
   copied: boolean;
+  onToggleDiff: () => void;
   onRetry: () => void;
   onCopy: (text: string) => void;
   onOpenSettings: () => void;
+  onOpenCredits?: () => void;
+  onUseResult?: (text: string) => void;
 }
 
-export function ResultPanel({ result, copied, onRetry, onCopy, onOpenSettings }: ResultPanelProps) {
+export function ResultPanel({
+  result,
+  originalText,
+  showDiff,
+  copied,
+  onToggleDiff,
+  onRetry,
+  onCopy,
+  onOpenSettings,
+  onOpenCredits,
+  onUseResult,
+}: ResultPanelProps) {
   if (result.status === "idle") {
     return null;
   }
@@ -54,6 +71,15 @@ export function ResultPanel({ result, copied, onRetry, onCopy, onOpenSettings }:
               className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
               {MESSAGES.popup.openSettings}
+            </button>
+          )}
+          {formatted.nextStep === "credits" && (
+            <button
+              type="button"
+              onClick={onOpenCredits ?? onOpenSettings}
+              className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {onOpenCredits ? MESSAGES.popup.openCredits : MESSAGES.popup.openSettings}
             </button>
           )}
         </div>
@@ -118,19 +144,49 @@ export function ResultPanel({ result, copied, onRetry, onCopy, onOpenSettings }:
               ? MESSAGES.popup.noChanges
               : result.actionLabel}
         </span>
+
         {result.status === "complete" && result.text.length > 0 && (
-          <button
-            type="button"
-            onClick={() => onCopy(result.text)}
-            className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
-          >
-            {copied ? MESSAGES.popup.copied : MESSAGES.popup.copy}
-          </button>
+          <div className="flex items-center gap-1.5">
+            {!result.unchanged && (
+              <button
+                type="button"
+                aria-pressed={showDiff}
+                onClick={onToggleDiff}
+                className={`rounded-sm border px-2 py-0.5 text-[11px] font-medium transition focus-visible:ring-2 focus-visible:ring-accent ${
+                  showDiff
+                    ? "border-accent bg-accent text-accent-contrast"
+                    : "border-line-strong bg-canvas text-ink hover:bg-hover"
+                }`}
+              >
+                {showDiff ? MESSAGES.popup.resultTab : MESSAGES.popup.diffTab}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onCopy(result.text)}
+              className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {copied ? MESSAGES.popup.copied : MESSAGES.popup.copy}
+            </button>
+            {onUseResult && !result.unchanged && (
+              <button
+                type="button"
+                onClick={() => onUseResult(result.text)}
+                className="rounded-sm bg-accent px-2 py-0.5 text-[11px] font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {MESSAGES.write.useThis}
+              </button>
+            )}
+          </div>
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-sm border border-line bg-canvas p-2.5 text-sm leading-relaxed whitespace-pre-wrap text-ink">
-        {result.text}
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-sm border border-line bg-canvas p-2.5 select-text">
+        {result.status === "complete" && showDiff && !result.unchanged ? (
+          <DiffView original={originalText} modified={result.text} />
+        ) : (
+          <div className="text-sm leading-relaxed whitespace-pre-wrap text-ink">{result.text}</div>
+        )}
       </div>
 
       {result.status === "complete" && footerParts.length > 0 && (

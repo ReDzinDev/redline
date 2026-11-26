@@ -16,6 +16,9 @@ export type ErrorCode =
   | "settings_save_failed"
   | "invalid_model"
   | "invalid_action"
+  | "autostart_error"
+  | "opener_error"
+  | "history_error"
   | "ai_no_key"
   | "ai_bad_request"
   | "ai_unauthorized"
@@ -40,8 +43,12 @@ export interface AppStatusDto {
   hasApiKey: boolean;
   hotkey: string;
   hotkeyConflict: string | null;
+  hotkeyPaused: boolean;
   settingsRecovered: boolean;
+  historyRecovered: boolean;
   welcomeCompleted: boolean;
+  autostartEnabled: boolean;
+  appVersion: string;
 }
 
 export interface SettingsDto {
@@ -67,6 +74,24 @@ export interface ModelOptionDto {
 export interface KeyTestResultDto {
   label: string | null;
   limitRemaining: number | null;
+}
+
+export interface HistoryEntryDto {
+  id: string;
+  timestampMs: number;
+  action: string;
+  sourceApp: string | null;
+  model: string;
+  costUsd: number | null;
+  original: string;
+  result: string;
+}
+
+export interface AcceptHistoryMetaDto {
+  action: string;
+  model: string;
+  costUsd: number | null;
+  original: string;
 }
 
 export type PopupSessionEvent =
@@ -138,6 +163,9 @@ export interface PendingEditorDraft {
   sourceApp: string | null;
 }
 
+export type ExternalUrlTarget = "repo" | "openrouter_keys" | "openrouter_credits";
+export type MainTab = "write" | "history" | "settings";
+
 export function isApiError(value: unknown): value is ApiErrorDto {
   return (
     typeof value === "object" &&
@@ -177,12 +205,63 @@ export function saveModel(model: string): Promise<SettingsDto> {
   return invoke<SettingsDto>("save_model", { model });
 }
 
+export function saveCustomModel(customModelId: string | null): Promise<SettingsDto> {
+  return invoke<SettingsDto>("save_custom_model", { customModelId });
+}
+
 export function savePrivacy(denyDataCollection: boolean): Promise<SettingsDto> {
   return invoke<SettingsDto>("save_privacy", { denyDataCollection });
 }
 
 export function saveDialect(dialect: string): Promise<SettingsDto> {
   return invoke<SettingsDto>("save_dialect", { dialect });
+}
+
+export function saveHotkey(hotkey: string): Promise<SettingsDto> {
+  return invoke<SettingsDto>("save_hotkey", { hotkey });
+}
+
+export function saveHistoryEnabled(enabled: boolean): Promise<SettingsDto> {
+  return invoke<SettingsDto>("save_history_enabled", { enabled });
+}
+
+export function saveAutoRunAction(action: string | null): Promise<SettingsDto> {
+  return invoke<SettingsDto>("save_auto_run_action", { action });
+}
+
+export function setAutostartEnabled(enabled: boolean): Promise<boolean> {
+  return invoke<boolean>("set_autostart_enabled", { enabled });
+}
+
+export function completeWelcome(): Promise<SettingsDto> {
+  return invoke<SettingsDto>("complete_welcome");
+}
+
+export function getHistory(): Promise<HistoryEntryDto[]> {
+  return invoke<HistoryEntryDto[]>("get_history");
+}
+
+export function clearHistory(): Promise<void> {
+  return invoke<void>("clear_history");
+}
+
+export function recordHistoryEntry(entry: {
+  action: string;
+  sourceApp: string | null;
+  model: string;
+  costUsd: number | null;
+  original: string;
+  result: string;
+}): Promise<void> {
+  return invoke<void>("record_history_entry", { entry });
+}
+
+export function openExternalUrl(target: ExternalUrlTarget): Promise<void> {
+  return invoke<void>("open_external_url", { target });
+}
+
+export function openLogFolder(): Promise<void> {
+  return invoke<void>("open_log_folder");
 }
 
 export function lintText(text: string, requestId: number): Promise<LintResponseDto> {
@@ -213,8 +292,14 @@ export function resizePopup(expanded: boolean): Promise<void> {
   return invoke<void>("resize_popup", { expanded });
 }
 
-export function acceptPopupResult(text: string): Promise<AcceptResultDto> {
-  return invoke<AcceptResultDto>("accept_popup_result", { text });
+export function acceptPopupResult(
+  text: string,
+  historyMeta?: AcceptHistoryMetaDto,
+): Promise<AcceptResultDto> {
+  return invoke<AcceptResultDto>("accept_popup_result", {
+    text,
+    historyMeta: historyMeta ?? null,
+  });
 }
 
 export function dismissPopup(restoreFocus: boolean): Promise<void> {
@@ -241,4 +326,18 @@ export function listenPopupSession(
   handler: (event: PopupSessionEvent) => void,
 ): Promise<UnlistenFn> {
   return listen<PopupSessionEvent>("popup:session", (evt) => handler(evt.payload));
+}
+
+export function listenMainNavigate(handler: (tab: MainTab) => void): Promise<UnlistenFn> {
+  return listen<string>("main:navigate", (evt) => {
+    if (evt.payload === "write" || evt.payload === "history" || evt.payload === "settings") {
+      handler(evt.payload);
+    }
+  });
+}
+
+export function listenEditorLoadDraft(
+  handler: (draft: PendingEditorDraft) => void,
+): Promise<UnlistenFn> {
+  return listen<PendingEditorDraft>("editor:load-draft", (evt) => handler(evt.payload));
 }

@@ -25,6 +25,7 @@ import {
   openSettings,
   resizePopup,
   rewriteText,
+  type AcceptHistoryMetaDto,
   type ActionKind,
   type ActionRequestDto,
   type ToneOption,
@@ -72,6 +73,7 @@ export function PopupApp() {
   const [customInput, setCustomInput] = useState("");
   const [activeAction, setActiveAction] = useState<ActionRequestDto | null>(null);
   const [result, setResult] = useState<ResultState>(INITIAL_RESULT);
+  const [showDiff, setShowDiff] = useState(false);
   const [copied, setCopied] = useState(false);
   const [liveAnnouncement, setLiveAnnouncement] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
@@ -109,6 +111,7 @@ export function PopupApp() {
     cancelRewrite().catch(() => {});
     setActiveAction(null);
     setResult(INITIAL_RESULT);
+    setShowDiff(false);
     setCopied(false);
     setLiveAnnouncement("");
   }, []);
@@ -118,6 +121,7 @@ export function PopupApp() {
     const actionLabel = labelForAction(req);
     setActiveAction(req);
     setSubMode("none");
+    setShowDiff(false);
     setCopied(false);
     setLiveAnnouncement("");
     setResult({
@@ -183,6 +187,7 @@ export function PopupApp() {
       aiRequestIdRef.current += 1;
       lintRequestIdRef.current += 1;
       setCopied(false);
+      setShowDiff(false);
       setFallbackNotice(null);
       setLiveAnnouncement("");
       setSubMode("none");
@@ -330,16 +335,19 @@ export function PopupApp() {
     [phase, runAction, text],
   );
 
-  const handleAcceptText = useCallback(async (textToPaste: string) => {
-    try {
-      const res = await acceptPopupResult(textToPaste);
-      if (res.outcome === "copied_fallback") {
-        setFallbackNotice(MESSAGES.popup.copiedFallbackNotice);
+  const handleAcceptText = useCallback(
+    async (textToPaste: string, historyMeta: AcceptHistoryMetaDto) => {
+      try {
+        const res = await acceptPopupResult(textToPaste, historyMeta);
+        if (res.outcome === "copied_fallback") {
+          setFallbackNotice(MESSAGES.popup.copiedFallbackNotice);
+        }
+      } catch {
+        // Errors logged in Rust.
       }
-    } catch {
-      // Errors logged in Rust.
-    }
-  }, []);
+    },
+    [],
+  );
 
   const handleCopy = useCallback(async (value: string) => {
     try {
@@ -400,9 +408,19 @@ export function PopupApp() {
         if (action === "noop") return;
         e.preventDefault();
         if (action === "paste_ai") {
-          void handleAcceptText(result.text);
+          void handleAcceptText(result.text, {
+            action: result.actionLabel || "AI rewrite",
+            model: result.modelUsed ?? "OpenRouter",
+            costUsd: result.costUsd,
+            original: initialText,
+          });
         } else if (action === "paste_fixed") {
-          void handleAcceptText(text);
+          void handleAcceptText(text, {
+            action: MESSAGES.grammar.harperHistoryAction,
+            model: MESSAGES.grammar.harperHistoryModel,
+            costUsd: 0,
+            original: initialText,
+          });
         } else if (action === "close") {
           dismissPopup(true).catch(() => {});
         }
@@ -419,6 +437,12 @@ export function PopupApp() {
           e.preventDefault();
           handleSelectTone(matchedTone.tone);
         }
+        return;
+      }
+
+      if (e.key.toLowerCase() === "d" && result.status === "complete" && !result.unchanged) {
+        e.preventDefault();
+        setShowDiff((prev) => !prev);
         return;
       }
 
@@ -445,7 +469,11 @@ export function PopupApp() {
     handleSelectTone,
     handleUndo,
     harperFixesApplied,
+    initialText,
     phase,
+    result.actionLabel,
+    result.costUsd,
+    result.modelUsed,
     result.status,
     result.text,
     result.unchanged,
@@ -545,7 +573,10 @@ export function PopupApp() {
 
           <ResultPanel
             result={result}
+            originalText={text}
+            showDiff={showDiff}
             copied={copied}
+            onToggleDiff={() => setShowDiff((prev) => !prev)}
             onRetry={() => {
               if (activeAction) runAction(text, activeAction);
             }}
@@ -568,6 +599,9 @@ export function PopupApp() {
       <footer className="flex items-center justify-between gap-2 border-t border-line pt-2 text-[11px] text-ink-muted">
         <span>{hintText}</span>
         <div className="flex items-center gap-2">
+          {result.status === "complete" && !result.unchanged && (
+            <span>{MESSAGES.popup.hints.diff}</span>
+          )}
           <span>{MESSAGES.popup.hints.editor}</span>
           <span>{MESSAGES.popup.hints.esc}</span>
         </div>
