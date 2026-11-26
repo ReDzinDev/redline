@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { LintResponseDto } from "./grammarLogic";
 
 /**
  * Typed wrappers around Tauri commands and events (mirrored from src-tauri/src/dto.rs).
@@ -178,6 +179,14 @@ export function saveModel(model: string): Promise<SettingsDto> {
 
 export function savePrivacy(denyDataCollection: boolean): Promise<SettingsDto> {
   return invoke<SettingsDto>("save_privacy", { denyDataCollection });
+}
+
+export function saveDialect(dialect: string): Promise<SettingsDto> {
+  return invoke<SettingsDto>("save_dialect", { dialect });
+}
+
+export function lintText(text: string, requestId: number): Promise<LintResponseDto> {
+  return invoke<LintResponseDto>("lint_text", { text, requestId });
 }
 
 export function rewriteText(

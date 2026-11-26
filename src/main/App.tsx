@@ -6,6 +6,7 @@ import {
   getSettings,
   isApiError,
   saveApiKey,
+  saveDialect,
   saveModel,
   savePrivacy,
   testApiKey,
@@ -118,6 +119,16 @@ export function MainApp() {
     setFeedback(null);
     try {
       const updated = await savePrivacy(denyDataCollection);
+      setSettings(updated);
+    } catch (err: unknown) {
+      setFeedback(errorToFeedback(err));
+    }
+  }
+
+  async function handleDialectChange(nextDialect: string) {
+    setFeedback(null);
+    try {
+      const updated = await saveDialect(nextDialect);
       setSettings(updated);
     } catch (err: unknown) {
       setFeedback(errorToFeedback(err));
@@ -263,6 +274,30 @@ export function MainApp() {
               <span className="block text-xs text-ink-muted">{MESSAGES.settings.privacyHelp}</span>
             </span>
           </label>
+        </section>
+
+        <section className="space-y-3 rounded-lg border border-line bg-elevated p-4">
+          <h2 className="text-sm font-semibold text-ink">{MESSAGES.grammar.sectionTitle}</h2>
+          <div className="space-y-1.5">
+            <label
+              htmlFor="dialect-select"
+              className="block text-xs font-medium text-ink-secondary"
+            >
+              {MESSAGES.grammar.dialectLabel}
+            </label>
+            <select
+              id="dialect-select"
+              value={settings?.dialect ?? "american"}
+              onChange={(e) => handleDialectChange(e.target.value)}
+              className="w-full rounded-md border border-line-strong bg-canvas px-3 py-1.5 text-sm text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.dialects.map((d) => (
+                <option key={d.value} value={d.value}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </section>
       </div>
     </main>

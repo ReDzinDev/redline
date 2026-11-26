@@ -1,12 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActionBar } from "../components/ActionBar";
+import { LintCardList } from "../components/LintCardList";
 import { ResultPanel, type ResultState } from "../components/ResultPanel";
+import { UnderlinedText } from "../components/UnderlinedText";
+import {
+  applyAllFixes,
+  applySingleFix,
+  isLatestLintResponse,
+  popUndo,
+  pushUndo,
+  sliceVisibleCards,
+  type LintDto,
+  type SuggestionDto,
+} from "../lib/grammarLogic";
 import {
   acceptPopupResult,
   cancelRewrite,
   copyToClipboard,
   dismissPopup,
   isApiError,
+  lintText,
   listenPopupSession,
   openInEditor,
   openSettings,
@@ -51,6 +64,7 @@ function labelForAction(req: ActionRequestDto): string {
 export function PopupApp() {
   const [phase, setPhase] = useState<"capturing" | "ready" | "error">("capturing");
   const [sourceApp, setSourceApp] = useState("");
+  const [initialText, setInitialText] = useState("");
   const [text, setText] = useState("");
   const [captureErrorCode, setCaptureErrorCode] = useState<string | null>(null);
   const [recentCustom, setRecentCustom] = useState<string[]>([]);
@@ -62,11 +76,45 @@ export function PopupApp() {
   const [liveAnnouncement, setLiveAnnouncement] = useState("");
   const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
 
-  const requestIdRef = useRef(0);
+  // Harper state
+  const [lintLoading, setLintLoading] = useState(false);
+  const [lintEnglish, setLintEnglish] = useState(true);
+  const [lints, setLints] = useState<LintDto[]>([]);
+  const [ignoredIds, setIgnoredIds] = useState<Set<string>>(() => new Set());
+  const [undoStack, setUndoStack] = useState<string[]>([]);
+  const [highlightedLintId, setHighlightedLintId] = useState<string | null>(null);
+
+  const aiRequestIdRef = useRef(0);
+  const lintRequestIdRef = useRef(0);
   const expandedRef = useRef(false);
 
+  const runLint = useCallback((targetText: string) => {
+    const reqId = ++lintRequestIdRef.current;
+    setLintLoading(true);
+    lintText(targetText, reqId)
+      .then((res) => {
+        if (!isLatestLintResponse(res.requestId, lintRequestIdRef.current)) return;
+        setLintEnglish(res.english);
+        setLints(res.lints);
+        setLintLoading(false);
+      })
+      .catch(() => {
+        if (reqId !== lintRequestIdRef.current) return;
+        setLintLoading(false);
+      });
+  }, []);
+
+  const clearAiResult = useCallback(() => {
+    aiRequestIdRef.current += 1;
+    cancelRewrite().catch(() => {});
+    setActiveAction(null);
+    setResult(INITIAL_RESULT);
+    setCopied(false);
+    setLiveAnnouncement("");
+  }, []);
+
   const runAction = useCallback((currentText: string, req: ActionRequestDto) => {
-    const nextRequestId = ++requestIdRef.current;
+    const nextRequestId = ++aiRequestIdRef.current;
     const actionLabel = labelForAction(req);
     setActiveAction(req);
     setSubMode("none");
@@ -79,7 +127,7 @@ export function PopupApp() {
     });
 
     rewriteText(nextRequestId, currentText, req, (evt) => {
-      if (evt.requestId !== requestIdRef.current) return;
+      if (evt.requestId !== aiRequestIdRef.current) return;
 
       switch (evt.event) {
         case "delta":
@@ -117,7 +165,7 @@ export function PopupApp() {
           break;
       }
     }).catch((err: unknown) => {
-      if (nextRequestId !== requestIdRef.current) return;
+      if (nextRequestId !== aiRequestIdRef.current) return;
       const apiErr = isApiError(err)
         ? err
         : { code: "ai_unexpected", detail: String(err), retryAfterSecs: null };
@@ -132,7 +180,8 @@ export function PopupApp() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listenPopupSession((evt) => {
-      requestIdRef.current += 1;
+      aiRequestIdRef.current += 1;
+      lintRequestIdRef.current += 1;
       setCopied(false);
       setFallbackNotice(null);
       setLiveAnnouncement("");
@@ -140,18 +189,28 @@ export function PopupApp() {
       setCustomInput("");
       setActiveAction(null);
       setResult(INITIAL_RESULT);
+      setLints([]);
+      setLintEnglish(true);
+      setLintLoading(false);
+      setIgnoredIds(new Set());
+      setUndoStack([]);
+      setHighlightedLintId(null);
 
       if (evt.phase === "capturing") {
         setPhase("capturing");
         setSourceApp(evt.sourceApp);
+        setInitialText("");
         setText("");
         setCaptureErrorCode(null);
       } else if (evt.phase === "ready") {
         setPhase("ready");
         setSourceApp(evt.sourceApp);
+        setInitialText(evt.text);
         setText(evt.text);
         setCaptureErrorCode(null);
         setRecentCustom(evt.recentCustomInstructions);
+
+        runLint(evt.text);
 
         if (
           evt.autoRunAction &&
@@ -165,6 +224,7 @@ export function PopupApp() {
       } else {
         setPhase("error");
         setSourceApp(evt.sourceApp);
+        setInitialText("");
         setText("");
         setCaptureErrorCode(evt.errorCode);
       }
@@ -177,15 +237,60 @@ export function PopupApp() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [runAction]);
+  }, [runAction, runLint]);
 
-  // Switch between compact (460x320) and expanded (460x520) only on discrete state transitions.
-  const shouldExpand = result.status !== "idle" || subMode !== "none";
+  const { visible: visibleLints, fixableCount } = sliceVisibleCards(lints, ignoredIds);
+  const shouldExpand = result.status !== "idle" || subMode !== "none" || visibleLints.length >= 2;
+
   useEffect(() => {
     if (expandedRef.current === shouldExpand) return;
     expandedRef.current = shouldExpand;
     resizePopup(shouldExpand).catch(() => {});
   }, [shouldExpand]);
+
+  const handleApplyLint = useCallback(
+    (lint: LintDto, suggestion: SuggestionDto) => {
+      const nextText = applySingleFix(text, lint, suggestion);
+      if (nextText === null || nextText === text) return;
+      setUndoStack((prev) => pushUndo(prev, text));
+      setText(nextText);
+      if (result.status !== "idle") {
+        clearAiResult();
+      }
+      runLint(nextText);
+    },
+    [clearAiResult, result.status, runLint, text],
+  );
+
+  const handleFixAll = useCallback(() => {
+    const { text: nextText, appliedCount } = applyAllFixes(text, lints, ignoredIds);
+    if (appliedCount === 0 || nextText === text) return;
+    setUndoStack((prev) => pushUndo(prev, text));
+    setText(nextText);
+    if (result.status !== "idle") {
+      clearAiResult();
+    }
+    runLint(nextText);
+  }, [clearAiResult, ignoredIds, lints, result.status, runLint, text]);
+
+  const handleUndo = useCallback(() => {
+    const { previousText, nextStack } = popUndo(undoStack);
+    if (previousText === null) return;
+    setUndoStack(nextStack);
+    setText(previousText);
+    if (result.status !== "idle") {
+      clearAiResult();
+    }
+    runLint(previousText);
+  }, [clearAiResult, result.status, runLint, undoStack]);
+
+  const handleIgnoreLint = useCallback((lintId: string) => {
+    setIgnoredIds((prev) => {
+      const next = new Set(prev);
+      next.add(lintId);
+      return next;
+    });
+  }, []);
 
   const handleSelectAction = useCallback(
     (kind: ActionKind) => {
@@ -232,7 +337,7 @@ export function PopupApp() {
         setFallbackNotice(MESSAGES.popup.copiedFallbackNotice);
       }
     } catch {
-      // Errors logged in Rust; popup stays clean.
+      // Errors logged in Rust.
     }
   }, []);
 
@@ -241,9 +346,11 @@ export function PopupApp() {
       await copyToClipboard(value);
       setCopied(true);
     } catch {
-      // Ignore copy failure
+      // Ignore copy failure.
     }
   }, []);
+
+  const harperFixesApplied = text !== initialText;
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -268,6 +375,18 @@ export function PopupApp() {
         return;
       }
 
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === "z" &&
+        !isEditableTarget(tagName, isContentEditable)
+      ) {
+        if (undoStack.length > 0) {
+          e.preventDefault();
+          handleUndo();
+        }
+        return;
+      }
+
       if (e.key === "Enter") {
         if (shouldIgnoreGlobalEnter(tagName, isContentEditable, e.isComposing)) {
           return;
@@ -276,7 +395,7 @@ export function PopupApp() {
           phase,
           aiStatus: result.status,
           aiUnchanged: result.unchanged,
-          harperFixesApplied: false,
+          harperFixesApplied,
         });
         if (action === "noop") return;
         e.preventDefault();
@@ -303,6 +422,12 @@ export function PopupApp() {
         return;
       }
 
+      if (e.key.toLowerCase() === "f" && fixableCount >= 2) {
+        e.preventDefault();
+        handleFixAll();
+        return;
+      }
+
       const matchedAction = MESSAGES.actions.find((a) => a.key === e.key);
       if (matchedAction) {
         e.preventDefault();
@@ -313,22 +438,27 @@ export function PopupApp() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    fixableCount,
     handleAcceptText,
+    handleFixAll,
     handleSelectAction,
     handleSelectTone,
+    handleUndo,
+    harperFixesApplied,
     phase,
     result.status,
     result.text,
     result.unchanged,
     subMode,
     text,
+    undoStack.length,
   ]);
 
   const enterOutcome = resolveEnterAction({
     phase,
     aiStatus: result.status,
     aiUnchanged: result.unchanged,
-    harperFixesApplied: false,
+    harperFixesApplied,
   });
 
   const hintText =
@@ -343,7 +473,7 @@ export function PopupApp() {
   const appLabel = formatSourceAppLabel(sourceApp);
 
   return (
-    <main className="flex h-full flex-col gap-3 border border-line bg-canvas p-3 text-ink select-none">
+    <main className="flex h-full flex-col gap-2.5 border border-line bg-canvas p-3 text-ink select-none">
       <header className="flex items-center justify-between gap-2 border-b border-line pb-2">
         <span className="truncate text-xs font-semibold text-ink">
           {MESSAGES.popup.headerFrom(appLabel)}
@@ -381,10 +511,26 @@ export function PopupApp() {
       )}
 
       {phase === "ready" && (
-        <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-          <div className="max-h-24 overflow-y-auto rounded-md border border-line bg-elevated px-2.5 py-2 text-xs leading-relaxed whitespace-pre-wrap text-ink select-text">
-            {text}
-          </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-2">
+          <UnderlinedText
+            text={text}
+            lints={lints}
+            ignoredIds={ignoredIds}
+            onSelectLint={(lint) => setHighlightedLintId(lint.id)}
+          />
+
+          <LintCardList
+            loading={lintLoading}
+            english={lintEnglish}
+            lints={lints}
+            ignoredIds={ignoredIds}
+            canUndo={undoStack.length > 0}
+            highlightedLintId={highlightedLintId}
+            onApply={handleApplyLint}
+            onIgnore={handleIgnoreLint}
+            onFixAll={handleFixAll}
+            onUndo={handleUndo}
+          />
 
           <ActionBar
             activeKind={activeAction?.kind ?? null}
