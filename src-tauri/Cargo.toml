@@ -1,0 +1,29 @@
+[package]
+name = "redline"
+version = "0.1.0"
+description = "Lightweight Windows writing assistant for inline grammar checks and AI rewrites"
+authors = ["Redline Contributors"]
+license = "MIT"
+edition = "2024"
+
+[lib]
+name = "redline_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7.6", features = [] }
+
+[dependencies]
+log = "0.4.35"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tauri = { version = "2.12.7", features = ["tray-icon"] }
+tauri-plugin-log = "2.10.2"
+tauri-plugin-single-instance = "2.5.5"
+
+# Release profile: optimize size and runtime performance.
+# Intentionally NOT `panic = "abort"`: clipboard restore relies on Drop running.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
