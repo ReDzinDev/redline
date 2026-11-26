@@ -14,12 +14,33 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.7.6", features = [] }
 
 [dependencies]
+keyring-core = "1.1.0"
 log = "0.4.35"
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "json", "http2", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tauri = { version = "2.12.7", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2.4.1"
 tauri-plugin-log = "2.10.2"
 tauri-plugin-single-instance = "2.5.5"
+thiserror = "2.0.21"
+
+[target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = "1.1.0"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # Release profile: optimize size and runtime performance.
 # Intentionally NOT `panic = "abort"`: clipboard restore relies on Drop running.
