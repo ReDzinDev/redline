@@ -28,7 +28,7 @@ export function ActionBar({
 }: ActionBarProps) {
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-1.5" role="toolbar" aria-label="AI actions">
+      <div className="flex flex-wrap gap-1.5" role="toolbar" aria-label={MESSAGES.a11y.aiActions}>
         {MESSAGES.actions.map((item) => {
           const isSelected =
             activeKind === item.kind ||
@@ -46,7 +46,7 @@ export function ActionBar({
                   : "border-line-strong bg-elevated text-ink hover:bg-hover"
               }`}
             >
-              <kbd className="font-mono text-[10px] opacity-80">
+              <kbd className="font-mono text-3xs opacity-80">
                 {keyPrefix}
                 {item.key}
               </kbd>
@@ -57,7 +57,7 @@ export function ActionBar({
       </div>
 
       {subMode === "tone" && (
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Choose tone">
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label={MESSAGES.a11y.chooseTone}>
           {MESSAGES.tones.map((t) => (
             <button
               key={t.tone}
@@ -65,7 +65,7 @@ export function ActionBar({
               onClick={() => onSelectTone(t.tone)}
               className="inline-flex items-center gap-1 rounded-md border border-line-strong bg-canvas px-2 py-1 text-xs text-ink transition outline-none hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
-              <kbd className="font-mono text-[10px] text-ink-muted">{t.key}</kbd>
+              <kbd className="font-mono text-3xs text-ink-muted">{t.key}</kbd>
               <span>{t.label}</span>
             </button>
           ))}
@@ -101,9 +101,7 @@ export function ActionBar({
           </form>
           {recentCustom.length > 0 && (
             <div className="flex flex-wrap items-center gap-1">
-              <span className="text-[11px] text-ink-muted">
-                {MESSAGES.popup.recentCustomLabel}:
-              </span>
+              <span className="text-2xs text-ink-muted">{MESSAGES.popup.recentCustomLabel}:</span>
               {recentCustom.map((item) => (
                 <button
                   key={item}
@@ -112,7 +110,7 @@ export function ActionBar({
                     onCustomInputChange(item);
                     onRunCustom(item);
                   }}
-                  className="max-w-full truncate rounded-sm border border-line bg-elevated px-1.5 py-0.5 text-[11px] text-ink-secondary transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+                  className="max-w-full truncate rounded-sm border border-line bg-elevated px-1.5 py-0.5 text-2xs text-ink-secondary transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
                 >
                   {item}
                 </button>

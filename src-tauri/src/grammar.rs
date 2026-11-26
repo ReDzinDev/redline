@@ -348,4 +348,29 @@ mod tests {
         assert!(uk.english);
         assert!(!uk.lints.iter().any(|l| l.flagged == "colour"));
     }
+
+    #[test]
+    fn lint_12k_char_document_produces_valid_non_overlapping_utf16_spans() {
+        let engine = GrammarEngine::new("american");
+        let paragraph = "The quick brown fox jumps over teh lazy dog near the quiet river. ";
+        let mut text = String::with_capacity(12_100);
+        while text.len() < 12_000 {
+            text.push_str(paragraph);
+        }
+        text.truncate(12_000);
+
+        let res = engine.lint(&text, 42);
+        assert!(res.english);
+        assert!(!res.lints.is_empty());
+
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let mut prev_end = 0usize;
+        for lint in &res.lints {
+            assert!(lint.start >= prev_end, "lint spans must not overlap");
+            assert!(lint.end <= utf16.len(), "lint end out of UTF-16 bounds");
+            let sliced = String::from_utf16(&utf16[lint.start..lint.end]).expect("valid utf16");
+            assert_eq!(sliced, lint.flagged);
+            prev_end = lint.end;
+        }
+    }
 }

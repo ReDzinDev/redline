@@ -21,13 +21,18 @@ import {
 import { formatApiError, MESSAGES } from "../lib/messages";
 
 type Feedback =
-  | { kind: "info"; headline: string; detail?: string | null }
-  | { kind: "error"; headline: string; detail?: string | null };
+  | { kind: "info"; headline: string; detail?: string | null; showCreditsLink?: boolean }
+  | { kind: "error"; headline: string; detail?: string | null; showCreditsLink?: boolean };
 
 function errorToFeedback(err: unknown): Feedback {
   if (isApiError(err)) {
     const formatted = formatApiError(err);
-    return { kind: "error", headline: formatted.headline, detail: formatted.detail };
+    return {
+      kind: "error",
+      headline: formatted.headline,
+      detail: formatted.detail,
+      showCreditsLink: formatted.nextStep === "credits",
+    };
   }
   return {
     kind: "error",
@@ -210,9 +215,7 @@ export function SettingsTab({
           <div>
             <p className="text-xs font-medium text-ink">{MESSAGES.settings.hotkeyLabel}</p>
             {status.hotkeyPaused && (
-              <p className="text-[11px] text-status-warning">
-                {MESSAGES.settings.hotkeyPausedNote}
-              </p>
+              <p className="text-2xs text-status-warning">{MESSAGES.settings.hotkeyPausedNote}</p>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -250,7 +253,7 @@ export function SettingsTab({
                 .then((actual) => onStatusChange({ ...status, autostartEnabled: actual }))
                 .catch((err: unknown) => setGeneralFeedback(errorToFeedback(err)));
             }}
-            className="accent-accent"
+            className="rounded-sm accent-accent focus-visible:ring-2 focus-visible:ring-accent"
           />
           <span>{MESSAGES.settings.autostartLabel}</span>
         </label>
@@ -264,7 +267,7 @@ export function SettingsTab({
                 .then(onSettingsChange)
                 .catch((err: unknown) => setGeneralFeedback(errorToFeedback(err)));
             }}
-            className="accent-accent"
+            className="rounded-sm accent-accent focus-visible:ring-2 focus-visible:ring-accent"
           />
           <span>{MESSAGES.settings.historyEnabledLabel}</span>
         </label>
@@ -325,6 +328,12 @@ export function SettingsTab({
               spellCheck={false}
               value={keyInput}
               onChange={(e) => setKeyInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !busy && !testing && keyInput.trim().length > 0) {
+                  e.preventDefault();
+                  void handleSaveKey();
+                }
+              }}
               placeholder={MESSAGES.settings.apiKeyPlaceholder}
               className="min-w-0 flex-1 rounded-md border border-line-strong bg-canvas px-3 py-1.5 text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
@@ -397,6 +406,12 @@ export function SettingsTab({
               type="text"
               value={customModelInput}
               onChange={(e) => setCustomModelInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !checkingModel && customModelInput.trim().length > 0) {
+                  e.preventDefault();
+                  void handleCheckCustomModel();
+                }
+              }}
               placeholder={MESSAGES.settings.customModelPlaceholder}
               className="min-w-0 flex-1 rounded-md border border-line-strong bg-canvas px-3 py-1.5 font-mono text-xs text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
             />
@@ -437,27 +452,34 @@ export function SettingsTab({
                 .then(onSettingsChange)
                 .catch((err: unknown) => setFeedback(errorToFeedback(err)));
             }}
-            className="mt-0.5 accent-accent"
+            className="mt-0.5 rounded-sm accent-accent focus-visible:ring-2 focus-visible:ring-accent"
           />
           <span className="space-y-0.5">
             <span className="block font-medium text-ink">{MESSAGES.settings.privacyLabel}</span>
-            <span className="block text-[11px] text-ink-muted">
-              {MESSAGES.settings.privacyHelp}
-            </span>
+            <span className="block text-2xs text-ink-muted">{MESSAGES.settings.privacyHelp}</span>
           </span>
         </label>
 
         {feedback && (
           <div
             role={feedback.kind === "error" ? "alert" : "status"}
-            className={`rounded-md border bg-canvas px-3 py-2 text-xs ${
+            className={`space-y-1.5 rounded-md border bg-canvas px-3 py-2 text-xs ${
               feedback.kind === "error"
                 ? "border-status-error text-status-error"
                 : "border-line-strong text-ink"
             }`}
           >
             <p className="font-medium">{feedback.headline}</p>
-            {feedback.detail && <p className="mt-1 text-ink-secondary">{feedback.detail}</p>}
+            {feedback.detail && <p className="text-ink-secondary">{feedback.detail}</p>}
+            {feedback.showCreditsLink && (
+              <button
+                type="button"
+                onClick={() => openExternalUrl("openrouter_credits").catch(() => {})}
+                className="text-xs font-medium text-accent underline underline-offset-2 focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {MESSAGES.popup.openCredits}
+              </button>
+            )}
           </div>
         )}
       </section>

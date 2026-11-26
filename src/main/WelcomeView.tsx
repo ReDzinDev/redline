@@ -68,6 +68,7 @@ export function WelcomeView({ status, onComplete }: WelcomeViewProps) {
 
   async function handleDone() {
     setBusy(true);
+    setFeedback(null);
     try {
       if (keyInput.trim().length > 0 && !hasKey) {
         await saveApiKey(keyInput);
@@ -75,6 +76,9 @@ export function WelcomeView({ status, onComplete }: WelcomeViewProps) {
       }
       await completeWelcome();
       onComplete({ hasApiKey: hasKey || keyInput.trim().length > 0, autostartEnabled: autostart });
+    } catch (err: unknown) {
+      const msg = isApiError(err) ? formatApiError(err).headline : String(err);
+      setFeedback({ kind: "error", text: msg });
     } finally {
       setBusy(false);
     }
@@ -152,7 +156,7 @@ export function WelcomeView({ status, onComplete }: WelcomeViewProps) {
           type="checkbox"
           checked={autostart}
           onChange={(e) => void handleAutostartToggle(e.target.checked)}
-          className="accent-accent"
+          className="rounded-sm accent-accent focus-visible:ring-2 focus-visible:ring-accent"
         />
         <span>{MESSAGES.welcome.startAtLogin}</span>
       </label>

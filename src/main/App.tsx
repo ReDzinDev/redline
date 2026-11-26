@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useState } from "react";
 import {
   getAppStatus,
   getCuratedModels,
@@ -94,21 +94,43 @@ export function MainApp() {
     { id: "settings", label: MESSAGES.tabs.settings },
   ];
 
+  function handleTabKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let nextIndex: number | null = null;
+    if (e.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+    else if (e.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+    else if (e.key === "Home") nextIndex = 0;
+    else if (e.key === "End") nextIndex = tabs.length - 1;
+    if (nextIndex === null) return;
+    e.preventDefault();
+    const targetTab = tabs[nextIndex];
+    if (!targetTab) return;
+    setActiveTab(targetTab.id);
+    document.getElementById(`tab-${targetTab.id}`)?.focus();
+  }
+
   return (
     <main className="flex h-full flex-col gap-4 bg-canvas p-5 text-ink">
       <header className="flex items-center justify-between gap-4 border-b border-line pb-3">
         <div className="flex items-center gap-4">
           <h1 className="text-base font-semibold tracking-tight text-ink">{MESSAGES.app.name}</h1>
-          <nav aria-label="Main sections" role="tablist" className="flex items-center gap-1">
-            {tabs.map((tab) => {
+          <nav
+            aria-label={MESSAGES.a11y.mainSections}
+            role="tablist"
+            className="flex items-center gap-1"
+          >
+            {tabs.map((tab, idx) => {
               const selected = activeTab === tab.id;
               return (
                 <button
                   key={tab.id}
+                  id={`tab-${tab.id}`}
                   type="button"
                   role="tab"
                   aria-selected={selected}
+                  aria-controls={`panel-${tab.id}`}
+                  tabIndex={selected ? 0 : -1}
                   onClick={() => setActiveTab(tab.id)}
+                  onKeyDown={(e) => handleTabKeyDown(e, idx)}
                   className={`rounded-md px-3 py-1 text-xs font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                     selected
                       ? "bg-accent text-accent-contrast"
@@ -127,30 +149,37 @@ export function MainApp() {
         </kbd>
       </header>
 
-      {activeTab === "write" && (
-        <WriteTab
-          text={editorText}
-          sourceApp={editorSourceApp}
-          recentCustom={settings.recentCustomInstructions}
-          onTextChange={setEditorText}
-          onRecentCustomChange={(next) =>
-            setSettings((prev) => (prev ? { ...prev, recentCustomInstructions: next } : prev))
-          }
-          onOpenSettings={() => setActiveTab("settings")}
-        />
-      )}
+      <div
+        id={`panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`tab-${activeTab}`}
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        {activeTab === "write" && (
+          <WriteTab
+            text={editorText}
+            sourceApp={editorSourceApp}
+            recentCustom={settings.recentCustomInstructions}
+            onTextChange={setEditorText}
+            onRecentCustomChange={(next) =>
+              setSettings((prev) => (prev ? { ...prev, recentCustomInstructions: next } : prev))
+            }
+            onOpenSettings={() => setActiveTab("settings")}
+          />
+        )}
 
-      {activeTab === "history" && <HistoryTab historyEnabled={settings.historyEnabled} />}
+        {activeTab === "history" && <HistoryTab historyEnabled={settings.historyEnabled} />}
 
-      {activeTab === "settings" && (
-        <SettingsTab
-          status={status}
-          settings={settings}
-          models={models}
-          onStatusChange={setStatus}
-          onSettingsChange={setSettings}
-        />
-      )}
+        {activeTab === "settings" && (
+          <SettingsTab
+            status={status}
+            settings={settings}
+            models={models}
+            onStatusChange={setStatus}
+            onSettingsChange={setSettings}
+          />
+        )}
+      </div>
     </main>
   );
 }

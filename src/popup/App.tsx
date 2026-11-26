@@ -30,7 +30,7 @@ import {
   type ActionRequestDto,
   type ToneOption,
 } from "../lib/ipc";
-import { formatCaptureError, MESSAGES } from "../lib/messages";
+import { formatApiError, formatCaptureError, MESSAGES } from "../lib/messages";
 import {
   formatSourceAppLabel,
   isEditableTarget,
@@ -76,7 +76,10 @@ export function PopupApp() {
   const [showDiff, setShowDiff] = useState(false);
   const [copied, setCopied] = useState(false);
   const [liveAnnouncement, setLiveAnnouncement] = useState("");
-  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+  const [fallbackNotice, setFallbackNotice] = useState<{
+    kind: "info" | "error";
+    text: string;
+  } | null>(null);
 
   // Harper state
   const [lintLoading, setLintLoading] = useState(false);
@@ -340,10 +343,11 @@ export function PopupApp() {
       try {
         const res = await acceptPopupResult(textToPaste, historyMeta);
         if (res.outcome === "copied_fallback") {
-          setFallbackNotice(MESSAGES.popup.copiedFallbackNotice);
+          setFallbackNotice({ kind: "info", text: MESSAGES.popup.copiedFallbackNotice });
         }
-      } catch {
-        // Errors logged in Rust.
+      } catch (err: unknown) {
+        const headline = isApiError(err) ? formatApiError(err).headline : "Couldn't paste text.";
+        setFallbackNotice({ kind: "error", text: headline });
       }
     },
     [],
@@ -586,18 +590,49 @@ export function PopupApp() {
             onOpenSettings={() => {
               openSettings().catch(() => {});
             }}
+            onPasteResult={() => {
+              void handleAcceptText(result.text, {
+                action: result.actionLabel || "AI rewrite",
+                model: result.modelUsed ?? "OpenRouter",
+                costUsd: result.costUsd,
+                original: initialText,
+              });
+            }}
           />
 
           {fallbackNotice && (
-            <p role="status" className="text-xs font-medium text-status-info">
-              {fallbackNotice}
+            <p
+              role={fallbackNotice.kind === "error" ? "alert" : "status"}
+              className={`text-xs font-medium ${
+                fallbackNotice.kind === "error" ? "text-status-error" : "text-status-info"
+              }`}
+            >
+              {fallbackNotice.text}
             </p>
           )}
         </div>
       )}
 
-      <footer className="flex items-center justify-between gap-2 border-t border-line pt-2 text-[11px] text-ink-muted">
-        <span>{hintText}</span>
+      <footer className="flex items-center justify-between gap-2 border-t border-line pt-2 text-2xs text-ink-muted">
+        <div className="flex items-center gap-2">
+          <span>{hintText}</span>
+          {enterOutcome === "paste_fixed" && (
+            <button
+              type="button"
+              onClick={() => {
+                void handleAcceptText(text, {
+                  action: MESSAGES.grammar.harperHistoryAction,
+                  model: MESSAGES.grammar.harperHistoryModel,
+                  costUsd: 0,
+                  original: initialText,
+                });
+              }}
+              className="rounded-sm bg-accent px-2 py-0.5 text-2xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.popup.paste}
+            </button>
+          )}
+        </div>
         <div className="flex items-center gap-2">
           {result.status === "complete" && !result.unchanged && (
             <span>{MESSAGES.popup.hints.diff}</span>

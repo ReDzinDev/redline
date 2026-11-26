@@ -59,7 +59,7 @@ export function LintCardList({
   return (
     <section aria-label={MESSAGES.grammar.sectionLabel} className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-medium text-ink-secondary">
+        <span className="text-2xs font-medium text-ink-secondary">
           {visible.length > 0
             ? MESSAGES.grammar.issuesCount(visible.length + overflowCount)
             : MESSAGES.grammar.noIssues}
@@ -69,7 +69,7 @@ export function LintCardList({
             <button
               type="button"
               onClick={onUndo}
-              className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-medium text-ink transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
               {MESSAGES.grammar.undo}
             </button>
@@ -78,9 +78,9 @@ export function LintCardList({
             <button
               type="button"
               onClick={onFixAll}
-              className="inline-flex items-center gap-1 rounded-sm bg-accent px-2 py-0.5 text-[11px] font-medium text-accent-contrast transition hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+              className="inline-flex items-center gap-1 rounded-sm bg-accent px-2 py-0.5 text-2xs font-medium text-accent-contrast transition hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
-              <kbd className="font-mono text-[10px] opacity-80">F</kbd>
+              <kbd className="font-mono text-3xs opacity-80">F</kbd>
               <span>{MESSAGES.grammar.fixAll}</span>
             </button>
           )}
@@ -91,25 +91,37 @@ export function LintCardList({
         <div ref={listRef} className="max-h-36 space-y-1.5 overflow-y-auto pr-0.5">
           {visible.map((lint, idx) => {
             const isHighlighted = highlightedLintId === lint.id;
+            const headerContent = (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <span className="rounded-sm border border-line bg-canvas px-1 py-0.5 text-3xs font-medium text-ink-secondary">
+                    {lint.category}
+                  </span>
+                  <span className="truncate font-medium text-ink">{lint.flagged}</span>
+                </div>
+                <p className="text-2xs text-ink-secondary">{lint.message}</p>
+              </>
+            );
             return (
               <article
                 key={lint.id}
                 data-lint-card
-                onClick={() => onSelectCard?.(lint)}
                 className={`space-y-1 rounded-md border bg-elevated p-2 text-xs ${
                   isHighlighted ? "border-accent" : "border-line"
                 }`}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="rounded-sm border border-line bg-canvas px-1 py-0.5 text-[10px] font-medium text-ink-secondary">
-                        {lint.category}
-                      </span>
-                      <span className="truncate font-medium text-ink">{lint.flagged}</span>
-                    </div>
-                    <p className="text-[11px] text-ink-secondary">{lint.message}</p>
-                  </div>
+                  {onSelectCard ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelectCard(lint)}
+                      className="min-w-0 flex-1 space-y-0.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    >
+                      {headerContent}
+                    </button>
+                  ) : (
+                    <div className="min-w-0 space-y-0.5">{headerContent}</div>
+                  )}
                   <button
                     type="button"
                     onClick={(e) => {
@@ -117,7 +129,7 @@ export function LintCardList({
                       onIgnore(lint.id);
                       focusNextCard(idx);
                     }}
-                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] text-ink-muted transition hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
+                    className="shrink-0 rounded-sm px-1.5 py-0.5 text-2xs text-ink-muted transition hover:bg-hover hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"
                   >
                     {MESSAGES.grammar.ignore}
                   </button>
@@ -134,7 +146,7 @@ export function LintCardList({
                           onApply(lint, sug);
                           focusNextCard(idx);
                         }}
-                        className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+                        className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-medium text-ink transition hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
                       >
                         {sug.label}
                       </button>
@@ -146,7 +158,7 @@ export function LintCardList({
           })}
 
           {overflowCount > 0 && (
-            <p className="px-1 text-[11px] text-ink-muted">
+            <p className="px-1 text-2xs text-ink-muted">
               {MESSAGES.grammar.moreCount(overflowCount)}
             </p>
           )}

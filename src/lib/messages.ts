@@ -14,6 +14,13 @@ export const MESSAGES = {
     history: "History",
     settings: "Settings",
   },
+  a11y: {
+    mainSections: "Main sections",
+    aiActions: "AI actions",
+    chooseTone: "Choose tone",
+    selectIssue: (category: string, flagged: string) =>
+      `Highlight ${category} suggestion for "${flagged}"`,
+  },
   welcome: {
     heading: "Welcome to Redline",
     hotkeySummary: (hotkey: string) =>
@@ -89,7 +96,9 @@ export const MESSAGES = {
     closeLabel: "Close",
     openInEditor: "Open in editor",
     openSettings: "Open Settings",
+    tryAnotherModel: "Try another model",
     openCredits: "Open OpenRouter credits",
+    paste: "Paste",
     retry: "Retry",
     copy: "Copy",
     copied: "Copied",
@@ -188,7 +197,13 @@ export function formatCaptureError(code: string): string {
   }
 }
 
-export type ErrorNextStep = "settings" | "retry" | "credits" | "none";
+export type ErrorNextStep =
+  | "settings"
+  | "try_another_model"
+  | "retry"
+  | "retry_or_model"
+  | "credits"
+  | "none";
 
 export function formatApiError(err: ApiErrorDto): {
   headline: string;
@@ -224,7 +239,7 @@ export function formatApiError(err: ApiErrorDto): {
       return {
         headline: "OpenRouter blocked this request.",
         detail: err.detail,
-        nextStep: "settings",
+        nextStep: "try_another_model",
       };
     case "ai_no_provider":
       return {
@@ -245,7 +260,7 @@ export function formatApiError(err: ApiErrorDto): {
       return {
         headline: "This model isn't responding right now.",
         detail: err.detail,
-        nextStep: "retry",
+        nextStep: "retry_or_model",
       };
     case "ai_network":
       return {
@@ -266,6 +281,36 @@ export function formatApiError(err: ApiErrorDto): {
         detail: null,
         nextStep: "retry",
       };
+    case "selection_too_long":
+      return {
+        headline: MESSAGES.captureErrors.selection_too_long,
+        detail: err.detail,
+        nextStep: "none",
+      };
+    case "clipboard_busy":
+      return {
+        headline: MESSAGES.captureErrors.clipboard_busy,
+        detail: err.detail,
+        nextStep: "retry",
+      };
+    case "paste_failed":
+      return {
+        headline: "Couldn't paste into the target app.",
+        detail: err.detail,
+        nextStep: "none",
+      };
+    case "invalid_model":
+      return {
+        headline: "Choose a valid model ID.",
+        detail: err.detail,
+        nextStep: "settings",
+      };
+    case "invalid_action":
+      return {
+        headline: "Couldn't run that action.",
+        detail: err.detail,
+        nextStep: "none",
+      };
     case "hotkey_conflict":
       return {
         headline: MESSAGES.settings.hotkeyConflict(err.detail ?? "That shortcut"),
@@ -283,6 +328,30 @@ export function formatApiError(err: ApiErrorDto): {
         headline: "Couldn't save settings.",
         detail: err.detail,
         nextStep: "none",
+      };
+    case "autostart_error":
+      return {
+        headline: "Couldn't update the Windows startup setting.",
+        detail: err.detail,
+        nextStep: "none",
+      };
+    case "history_error":
+      return {
+        headline: "Couldn't update local history.",
+        detail: err.detail,
+        nextStep: "none",
+      };
+    case "opener_error":
+      return {
+        headline: "Couldn't open that link or folder.",
+        detail: err.detail,
+        nextStep: "none",
+      };
+    case "lint_failed":
+      return {
+        headline: "Grammar check couldn't complete.",
+        detail: err.detail,
+        nextStep: "retry",
       };
     default:
       return {

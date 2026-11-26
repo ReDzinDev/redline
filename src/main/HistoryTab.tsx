@@ -93,27 +93,29 @@ export function HistoryTab({ historyEnabled }: HistoryTabProps) {
                 key={entry.id}
                 className="rounded-md border border-line bg-elevated p-3 text-xs"
               >
-                <div className="flex items-center justify-between gap-2">
-                  <button
-                    type="button"
-                    aria-expanded={isOpen}
-                    onClick={() => setExpandedId(isOpen ? null : entry.id)}
-                    className="min-w-0 flex-1 text-left font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                  >
+                <button
+                  type="button"
+                  aria-expanded={isOpen}
+                  aria-controls={`history-diff-${entry.id}`}
+                  onClick={() => setExpandedId(isOpen ? null : entry.id)}
+                  className="flex w-full items-center justify-between gap-2 rounded-sm text-left font-medium text-ink outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                >
+                  <span className="min-w-0 flex-1">
                     <span className="block truncate">{meta}</span>
-                    <span className="mt-0.5 block truncate text-ink-secondary">{entry.result}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setExpandedId(isOpen ? null : entry.id)}
-                    className="shrink-0 rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] text-ink-secondary hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
-                  >
+                    <span className="mt-0.5 block truncate font-normal text-ink-secondary">
+                      {entry.result}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-normal text-ink-secondary">
                     {isOpen ? MESSAGES.history.hideDiff : MESSAGES.history.showDiff}
-                  </button>
-                </div>
+                  </span>
+                </button>
 
                 {isOpen && (
-                  <div className="mt-3 space-y-2 border-t border-line pt-2.5">
+                  <div
+                    id={`history-diff-${entry.id}`}
+                    className="mt-3 space-y-2 border-t border-line pt-2.5"
+                  >
                     <div className="rounded-sm border border-line bg-canvas p-2.5">
                       <DiffView original={entry.original} modified={entry.result} />
                     </div>

@@ -27,6 +27,7 @@ interface ResultPanelProps {
   onOpenSettings: () => void;
   onOpenCredits?: () => void;
   onUseResult?: (text: string) => void;
+  onPasteResult?: () => void;
 }
 
 export function ResultPanel({
@@ -40,6 +41,7 @@ export function ResultPanel({
   onOpenSettings,
   onOpenCredits,
   onUseResult,
+  onPasteResult,
 }: ResultPanelProps) {
   if (result.status === "idle") {
     return null;
@@ -55,13 +57,31 @@ export function ResultPanel({
         <p className="font-medium text-status-error">{formatted.headline}</p>
         {formatted.detail && <p className="text-ink-secondary">{formatted.detail}</p>}
         <div className="flex flex-wrap gap-2">
-          {formatted.nextStep === "retry" && (
+          {(formatted.nextStep === "retry" || formatted.nextStep === "retry_or_model") && (
             <button
               type="button"
               onClick={onRetry}
               className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
               {MESSAGES.popup.retry}
+            </button>
+          )}
+          {formatted.nextStep === "retry_or_model" && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="rounded-md border border-line-strong bg-canvas px-2.5 py-1 text-xs font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.popup.tryAnotherModel}
+            </button>
+          )}
+          {formatted.nextStep === "try_another_model" && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {MESSAGES.popup.tryAnotherModel}
             </button>
           )}
           {formatted.nextStep === "settings" && (
@@ -152,7 +172,7 @@ export function ResultPanel({
                 type="button"
                 aria-pressed={showDiff}
                 onClick={onToggleDiff}
-                className={`rounded-sm border px-2 py-0.5 text-[11px] font-medium transition focus-visible:ring-2 focus-visible:ring-accent ${
+                className={`rounded-sm border px-2 py-0.5 text-2xs font-medium transition focus-visible:ring-2 focus-visible:ring-accent ${
                   showDiff
                     ? "border-accent bg-accent text-accent-contrast"
                     : "border-line-strong bg-canvas text-ink hover:bg-hover"
@@ -164,15 +184,24 @@ export function ResultPanel({
             <button
               type="button"
               onClick={() => onCopy(result.text)}
-              className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-[11px] font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
+              className="rounded-sm border border-line-strong bg-canvas px-2 py-0.5 text-2xs font-medium text-ink hover:bg-hover focus-visible:ring-2 focus-visible:ring-accent"
             >
               {copied ? MESSAGES.popup.copied : MESSAGES.popup.copy}
             </button>
+            {onPasteResult && !result.unchanged && (
+              <button
+                type="button"
+                onClick={onPasteResult}
+                className="rounded-sm bg-accent px-2 py-0.5 text-2xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                {MESSAGES.popup.paste}
+              </button>
+            )}
             {onUseResult && !result.unchanged && (
               <button
                 type="button"
                 onClick={() => onUseResult(result.text)}
-                className="rounded-sm bg-accent px-2 py-0.5 text-[11px] font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
+                className="rounded-sm bg-accent px-2 py-0.5 text-2xs font-medium text-accent-contrast hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent"
               >
                 {MESSAGES.write.useThis}
               </button>
@@ -190,7 +219,7 @@ export function ResultPanel({
       </div>
 
       {result.status === "complete" && footerParts.length > 0 && (
-        <p className="truncate text-[11px] text-ink-muted">{footerParts.join(" · ")}</p>
+        <p className="truncate text-2xs text-ink-muted">{footerParts.join(" · ")}</p>
       )}
     </section>
   );
