@@ -3,52 +3,56 @@
 /*
  * Single source of truth for visual design tokens (light and dark).
  * Components consume these tokens via Tailwind utility classes only so
- * the later visual design pass can restyle the entire app in one file.
+ * restyling the entire app stays localized to this file.
  */
 :root {
   color-scheme: light dark;
 
-  --surface-canvas: #ffffff;
-  --surface-elevated: #f5f5f7;
-  --surface-hover: #eaecef;
+  --surface-canvas: #fcfcfb;
+  --surface-elevated: #f4f4f1;
+  --surface-hover: #eae9e4;
 
-  --text-primary: #18181b;
-  --text-secondary: #52525b;
-  --text-muted: #71717a;
+  --text-primary: #171717;
+  --text-secondary: #525252;
+  --text-muted: #737373;
 
-  --border-subtle: #e4e4e7;
-  --border-strong: #d4d4d8;
+  --border-subtle: #e5e5e0;
+  --border-strong: #d4d3cc;
 
-  --accent-primary: #dc2626;
-  --accent-hover: #b91c1c;
+  --accent-primary: #cf222e;
+  --accent-hover: #b41b25;
   --accent-contrast: #ffffff;
+  --accent-soft: #fef2f2;
 
-  --status-error: #dc2626;
-  --status-warning: #d97706;
+  --status-error: #cf222e;
+  --status-warning: #c27803;
   --status-info: #2563eb;
 
-  --diff-added-bg: #dcfce7;
-  --diff-added-ink: #166534;
-  --diff-removed-bg: #fee2e2;
+  --diff-added-bg: #e6f8ec;
+  --diff-added-ink: #14532d;
+  --diff-removed-bg: #fdecec;
   --diff-removed-ink: #991b1b;
+
+  --shadow-card: 0 1px 2px rgb(23 23 23 / 0.04);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --surface-canvas: #18181b;
-    --surface-elevated: #27272a;
-    --surface-hover: #3f3f46;
+  :root:not([data-theme="light"]) {
+    --surface-canvas: #141416;
+    --surface-elevated: #1d1d21;
+    --surface-hover: #28282e;
 
     --text-primary: #f4f4f5;
     --text-secondary: #a1a1aa;
     --text-muted: #71717a;
 
-    --border-subtle: #3f3f46;
-    --border-strong: #52525b;
+    --border-subtle: #2b2b32;
+    --border-strong: #3e3e47;
 
-    --accent-primary: #ef4444;
+    --accent-primary: #f0444f;
     --accent-hover: #dc2626;
     --accent-contrast: #ffffff;
+    --accent-soft: #2c1518;
 
     --status-error: #f87171;
     --status-warning: #fbbf24;
@@ -58,7 +62,40 @@
     --diff-added-ink: #bbf7d0;
     --diff-removed-bg: #7f1d1d;
     --diff-removed-ink: #fecaca;
+
+    --shadow-card: 0 1px 3px rgb(0 0 0 / 0.25);
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-canvas: #141416;
+  --surface-elevated: #1d1d21;
+  --surface-hover: #28282e;
+
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  --border-subtle: #2b2b32;
+  --border-strong: #3e3e47;
+
+  --accent-primary: #f0444f;
+  --accent-hover: #dc2626;
+  --accent-contrast: #ffffff;
+  --accent-soft: #2c1518;
+
+  --status-error: #f87171;
+  --status-warning: #fbbf24;
+  --status-info: #60a5fa;
+
+  --diff-added-bg: #14532d;
+  --diff-added-ink: #bbf7d0;
+  --diff-removed-bg: #7f1d1d;
+  --diff-removed-ink: #fecaca;
+
+  --shadow-card: 0 1px 3px rgb(0 0 0 / 0.25);
 }
 
 @theme inline {
@@ -76,6 +113,7 @@
   --color-accent: var(--accent-primary);
   --color-accent-hover: var(--accent-hover);
   --color-accent-contrast: var(--accent-contrast);
+  --color-accent-soft: var(--accent-soft);
 
   --color-status-error: var(--status-error);
   --color-status-warning: var(--status-warning);
@@ -86,7 +124,9 @@
   --color-diff-removed-bg: var(--diff-removed-bg);
   --color-diff-removed-ink: var(--diff-removed-ink);
 
-  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --shadow-card: var(--shadow-card);
+
+  --font-sans: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-mono: "Cascadia Code", Consolas, ui-monospace, monospace;
 
   --text-2xs: 0.6875rem;
@@ -96,7 +136,7 @@
 
   --spacing-sidebar: 17.5rem;
 
-  --radius-sm: 0.25rem;
+  --radius-sm: 0.3125rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
 }
@@ -110,4 +150,23 @@ body,
   color: var(--text-primary);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  border-radius: 9999px;
 }

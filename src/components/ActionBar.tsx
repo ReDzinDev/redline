@@ -40,13 +40,19 @@ export function ActionBar({
               type="button"
               disabled={disabled}
               onClick={() => onSelectAction(item.kind)}
-              className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50 ${
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium shadow-card transition outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-50 ${
                 isSelected
                   ? "border-accent bg-accent text-accent-contrast"
                   : "border-line-strong bg-elevated text-ink hover:bg-hover"
               }`}
             >
-              <kbd className="font-mono text-3xs opacity-80">
+              <kbd
+                className={`rounded-sm px-1 py-px font-mono text-3xs ${
+                  isSelected
+                    ? "bg-canvas/20 text-accent-contrast"
+                    : "border border-line bg-canvas text-ink-muted"
+                }`}
+              >
                 {keyPrefix}
                 {item.key}
               </kbd>

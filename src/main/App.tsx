@@ -112,7 +112,10 @@ export function MainApp() {
     <main className="flex h-full flex-col gap-4 bg-canvas p-5 text-ink">
       <header className="flex items-center justify-between gap-4 border-b border-line pb-3">
         <div className="flex items-center gap-4">
-          <h1 className="text-base font-semibold tracking-tight text-ink">{MESSAGES.app.name}</h1>
+          <div className="flex items-center gap-2">
+            <span aria-hidden="true" className="h-4 w-1 rounded-full bg-accent" />
+            <h1 className="text-base font-semibold tracking-tight text-ink">{MESSAGES.app.name}</h1>
+          </div>
           <nav
             aria-label={MESSAGES.a11y.mainSections}
             role="tablist"

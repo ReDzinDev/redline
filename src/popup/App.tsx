@@ -513,9 +513,12 @@ export function PopupApp() {
   return (
     <main className="flex h-full flex-col gap-2.5 border border-line bg-canvas p-3 text-ink select-none">
       <header className="flex items-center justify-between gap-2 border-b border-line pb-2">
-        <span className="truncate text-xs font-semibold text-ink">
-          {MESSAGES.popup.headerFrom(appLabel)}
-        </span>
+        <div className="flex min-w-0 items-center gap-2">
+          <span aria-hidden="true" className="h-3 w-1 shrink-0 rounded-full bg-accent" />
+          <span className="truncate text-xs font-semibold tracking-tight text-ink">
+            {MESSAGES.popup.headerFrom(appLabel)}
+          </span>
+        </div>
         <button
           type="button"
           aria-label={MESSAGES.popup.closeLabel}
