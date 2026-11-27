@@ -4,7 +4,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, HWND};
-use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation, TokenUIAccess,
+};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -21,6 +23,34 @@ pub struct TargetWindow {
     pub process_name: String,
     pub pid: u32,
     pub is_elevated: bool,
+}
+
+struct ThreadInputAttachment {
+    current_tid: u32,
+    other_tid: u32,
+    attached: bool,
+}
+
+impl ThreadInputAttachment {
+    unsafe fn attach(current_tid: u32, other_tid: u32) -> Self {
+        let attached = other_tid != 0
+            && other_tid != current_tid
+            && unsafe { AttachThreadInput(current_tid, other_tid, true) }.as_bool();
+        Self {
+            current_tid,
+            other_tid,
+            attached,
+        }
+    }
+}
+
+impl Drop for ThreadInputAttachment {
+    fn drop(&mut self) {
+        if self.attached {
+            // SAFETY: Paired with a successful `AttachThreadInput(..., true)` on the same thread.
+            let _ = unsafe { AttachThreadInput(self.current_tid, self.other_tid, false) };
+        }
+    }
 }
 
 /// Captures metadata about the currently focused foreground window.
@@ -44,15 +74,34 @@ pub fn capture_foreground_window() -> Option<TargetWindow> {
         hwnd: hwnd.0 as isize,
         process_name,
         pid,
-        // UIPI only blocks reading/sending input when the target is elevated and Redline is not.
+        // UIPI only blocks reading/sending input when the target is elevated/UIAccess and Redline is not.
         is_elevated: target_elevated && !self_elevated,
     })
 }
 
-/// Restores focus to `hwnd` and verifies the target window actually became foreground.
-/// Returns `false` if the window no longer exists or focus could not be restored.
-pub fn restore_focus(hwnd_raw: isize) -> bool {
-    if hwnd_raw == 0 {
+/// Verifies that `expected_hwnd` is still a valid window, currently holds foreground focus,
+/// and is still owned by `expected_pid` (protecting against HWND reuse and focus-shift TOCTOU).
+pub fn is_foreground_target(expected_hwnd: isize, expected_pid: u32) -> bool {
+    if expected_hwnd == 0 || expected_pid == 0 {
+        return false;
+    }
+    let hwnd = HWND(expected_hwnd as *mut c_void);
+    // SAFETY: Standard Win32 window and foreground queries.
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() || GetForegroundWindow() != hwnd {
+            return false;
+        }
+        let mut actual_pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut actual_pid));
+        actual_pid == expected_pid
+    }
+}
+
+/// Restores focus to `hwnd_raw` owned by `expected_pid` and verifies the target window actually
+/// became foreground. Returns `false` if the window no longer exists, its PID changed, or focus
+/// could not be restored.
+pub fn restore_focus(hwnd_raw: isize, expected_pid: u32) -> bool {
+    if hwnd_raw == 0 || expected_pid == 0 {
         return false;
     }
     let hwnd = HWND(hwnd_raw as *mut c_void);
@@ -62,18 +111,20 @@ pub fn restore_focus(hwnd_raw: isize) -> bool {
         if !IsWindow(Some(hwnd)).as_bool() {
             return false;
         }
+
+        let mut target_pid: u32 = 0;
+        let target_tid = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
+        if target_pid != expected_pid {
+            return false;
+        }
+
         if GetForegroundWindow() == hwnd {
             return true;
         }
 
-        let mut target_pid: u32 = 0;
-        let target_tid = GetWindowThreadProcessId(hwnd, Some(&mut target_pid));
-        if target_pid != 0 {
-            let _ = AllowSetForegroundWindow(target_pid);
-        }
-
+        let _ = AllowSetForegroundWindow(target_pid);
         let _ = SetForegroundWindow(hwnd);
-        if GetForegroundWindow() == hwnd {
+        if is_foreground_target(hwnd_raw, expected_pid) {
             return true;
         }
 
@@ -86,27 +137,21 @@ pub fn restore_focus(hwnd_raw: isize) -> bool {
             0
         };
 
-        let attached_fg = fg_tid != 0
-            && fg_tid != current_tid
-            && AttachThreadInput(current_tid, fg_tid, true).as_bool();
-        let attached_target = target_tid != 0
-            && target_tid != current_tid
-            && target_tid != fg_tid
-            && AttachThreadInput(current_tid, target_tid, true).as_bool();
+        {
+            let _attach_fg = ThreadInputAttachment::attach(current_tid, fg_tid);
+            let _attach_target = if target_tid != fg_tid {
+                Some(ThreadInputAttachment::attach(current_tid, target_tid))
+            } else {
+                None
+            };
 
-        let _ = BringWindowToTop(hwnd);
-        let _ = SetForegroundWindow(hwnd);
-
-        if attached_target {
-            let _ = AttachThreadInput(current_tid, target_tid, false);
-        }
-        if attached_fg {
-            let _ = AttachThreadInput(current_tid, fg_tid, false);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
         }
 
         let deadline = Instant::now() + Duration::from_millis(150);
         while Instant::now() < deadline {
-            if GetForegroundWindow() == hwnd {
+            if is_foreground_target(hwnd_raw, expected_pid) {
                 return true;
             }
             if !IsWindow(Some(hwnd)).as_bool() {
@@ -115,13 +160,14 @@ pub fn restore_focus(hwnd_raw: isize) -> bool {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        GetForegroundWindow() == hwnd
+        is_foreground_target(hwnd_raw, expected_pid)
     }
 }
 
 fn inspect_process(pid: u32) -> (String, bool) {
     if pid == 0 {
-        return ("unknown".to_string(), false);
+        // Fail closed when owning PID cannot be determined.
+        return ("unknown".to_string(), true);
     }
 
     // SAFETY: OpenProcess / QueryFullProcessImageNameW / OpenProcessToken with owned handles.
@@ -164,8 +210,8 @@ unsafe fn query_process_basename(handle: HANDLE) -> Option<String> {
 
 unsafe fn query_handle_elevated(process: HANDLE) -> bool {
     let mut token = HANDLE::default();
-    // SAFETY: Queries elevation token; ERROR_ACCESS_DENIED from an unelevated caller indicates
-    // a higher-integrity (elevated or protected) target process.
+    // SAFETY: Queries elevation & UIAccess token flags; ERROR_ACCESS_DENIED from an unelevated
+    // caller indicates a higher-integrity (elevated or protected) target process.
     let res = unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) };
     if let Err(err) = res {
         return err.code() == ERROR_ACCESS_DENIED.to_hresult();
@@ -173,7 +219,7 @@ unsafe fn query_handle_elevated(process: HANDLE) -> bool {
 
     let mut elevation = TOKEN_ELEVATION::default();
     let mut return_len: u32 = 0;
-    let ok = unsafe {
+    let elev_ok = unsafe {
         GetTokenInformation(
             token,
             TokenElevation,
@@ -183,8 +229,22 @@ unsafe fn query_handle_elevated(process: HANDLE) -> bool {
         )
         .is_ok()
     };
+
+    let mut ui_access: u32 = 0;
+    let mut ui_len: u32 = 0;
+    let ui_ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenUIAccess,
+            Some((&mut ui_access as *mut u32).cast::<c_void>()),
+            size_of::<u32>() as u32,
+            &mut ui_len,
+        )
+        .is_ok()
+    };
+
     let _ = unsafe { CloseHandle(token) };
-    ok && elevation.TokenIsElevated != 0
+    (elev_ok && elevation.TokenIsElevated != 0) || (ui_ok && ui_access != 0)
 }
 
 fn is_current_process_elevated() -> bool {
@@ -198,7 +258,8 @@ pub fn should_skip_uia(process_name: &str) -> bool {
     matches!(lower.as_str(), "code.exe" | "javaw.exe")
 }
 
-/// Terminal emulators where copy is `Ctrl+Shift+C` rather than `Ctrl+C`.
+/// Terminal emulators where copy is `Ctrl+Shift+C` rather than `Ctrl+C`, and where pasting
+/// multi-line text directly can execute shell commands.
 pub fn is_terminal_process(process_name: &str) -> bool {
     let lower = process_name.to_ascii_lowercase();
     matches!(
@@ -229,5 +290,13 @@ mod tests {
         assert!(is_terminal_process("WindowsTerminal.exe"));
         assert!(is_terminal_process("pwsh.exe"));
         assert!(!is_terminal_process("chrome.exe"));
+    }
+
+    #[test]
+    fn zero_hwnd_or_pid_fails_closed() {
+        assert!(!is_foreground_target(0, 1234));
+        assert!(!is_foreground_target(1234, 0));
+        assert!(!restore_focus(0, 1234));
+        assert!(!restore_focus(1234, 0));
     }
 }

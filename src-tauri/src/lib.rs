@@ -13,17 +13,18 @@ mod windows_mgr;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 use crate::ai::prompts::{LineEnding, normalize_line_endings};
-use crate::app_info::WINDOW_POPUP;
+use crate::app_info::{DEFAULT_HOTKEY, WINDOW_MAIN, WINDOW_POPUP, sanitize_log_value};
 use crate::capture::PlatformWorker;
 use crate::dto::{PendingEditorDraft, PopupSessionEvent};
 use crate::grammar::GrammarEngine;
@@ -33,8 +34,10 @@ use crate::settings::Settings;
 
 const BLUR_DISMISS_GRACE: Duration = Duration::from_millis(350);
 
-/// Holds the active inline capture target for the currently open popup session.
+/// Holds the active inline capture target for the currently open popup session,
+/// correlated to `session_id` so stale or raced accepts cannot target another window.
 pub struct ActiveCapture {
+    pub session_id: u64,
     pub target: TargetWindow,
     pub original_line_ending: LineEnding,
 }
@@ -49,7 +52,8 @@ pub struct AppState {
     pub session_counter: AtomicU64,
     pub active_capture: Mutex<Option<ActiveCapture>>,
     pub pending_editor_draft: Mutex<Option<PendingEditorDraft>>,
-    pub inflight_rewrites: Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>,
+    pub inflight_rewrites: Mutex<HashMap<String, (u64, tauri::async_runtime::JoinHandle<()>)>>,
+    pub latest_lint_req: Mutex<HashMap<String, u64>>,
     pub settings: Mutex<Settings>,
     pub settings_path: PathBuf,
     pub settings_recovered: bool,
@@ -76,13 +80,40 @@ impl AppState {
     }
 }
 
+/// Parses and validates a global hotkey string, requiring valid syntax and at least one modifier
+/// key so bare keys (e.g. `A` or `Enter`) can never be registered system-wide.
+pub fn validate_hotkey_shortcut(raw: &str) -> Result<Shortcut, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 64 {
+        return Err("Shortcut cannot be empty");
+    }
+    let shortcut = Shortcut::from_str(trimmed).map_err(|_| "Invalid shortcut format")?;
+    if shortcut.mods.is_empty() {
+        return Err("Shortcut must include at least one modifier key");
+    }
+    Ok(shortcut)
+}
+
 pub fn cancel_inflight(state: &AppState, window_id: &str) {
-    if let Some(handle) = state
+    if let Some((_, handle)) = state
         .inflight_rewrites
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(window_id)
     {
+        handle.abort();
+    }
+}
+
+pub fn cancel_all_inflight(state: &AppState) {
+    let handles: Vec<_> = state
+        .inflight_rewrites
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .drain()
+        .map(|(_, (_, handle))| handle)
+        .collect();
+    for handle in handles {
         handle.abort();
     }
 }
@@ -158,8 +189,20 @@ fn on_hotkey_pressed(app: &AppHandle) {
         return;
     };
 
+    // Never attempt to capture from Redline's own window (e.g. when Main Write tab is focused).
+    if target.pid == std::process::id() {
+        log::debug!("ignoring hotkey while Redline window is foreground");
+        return;
+    }
+
+    // Clear any stale capture before starting a new session.
+    *state
+        .active_capture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
     let session_id = state.session_counter.fetch_add(1, Ordering::SeqCst) + 1;
-    let source_app = target.process_name.clone();
+    let source_app = sanitize_log_value(&target.process_name, 128);
 
     if let Err(err) = windows_mgr::show_popup_for_capture(app) {
         log::error!("failed showing popup for capture: {err}");
@@ -215,11 +258,12 @@ fn on_hotkey_pressed(app: &AppHandle) {
                     )
                 };
 
+                let safe_app = sanitize_log_value(&captured.target.process_name, 128);
                 log::info!(
                     "capture ready: session={} method={:?} app={} chars={} elapsed_ms={}",
                     session_id,
                     captured.method,
-                    captured.target.process_name,
+                    safe_app,
                     normalized_text.chars().count(),
                     started.elapsed().as_millis()
                 );
@@ -228,6 +272,7 @@ fn on_hotkey_pressed(app: &AppHandle) {
                     .active_capture
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActiveCapture {
+                    session_id,
                     target: captured.target,
                     original_line_ending,
                 });
@@ -294,7 +339,11 @@ pub fn run() {
             MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_opener::Builder::new()
+                .open_js_links_on_click(false)
+                .build(),
+        )
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -344,10 +393,16 @@ pub fn run() {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
             let settings_file = settings::settings_path(&config_dir);
-            let loaded = settings::load_from_path(&settings_file);
+            let mut loaded = settings::load_from_path(&settings_file);
             let history_store = HistoryStore::load_from_path(history::history_path(&data_dir));
 
+            if validate_hotkey_shortcut(&loaded.settings.hotkey).is_err() {
+                log::warn!("loaded invalid hotkey from settings; resetting to default");
+                loaded.settings.hotkey = DEFAULT_HOTKEY.to_string();
+            }
+
             let hotkey = loaded.settings.hotkey.clone();
+            let safe_hotkey = sanitize_log_value(&hotkey, 64);
             let first_launch = !loaded.settings.welcome_completed;
 
             let worker = PlatformWorker::spawn();
@@ -355,10 +410,10 @@ pub fn run() {
             let mut conflict: Option<String> = None;
 
             if let Err(err) = app.global_shortcut().register(hotkey.as_str()) {
-                log::warn!("failed to register global shortcut '{hotkey}': {err}");
+                log::warn!("failed to register global shortcut '{safe_hotkey}': {err}");
                 conflict = Some(hotkey.clone());
             } else {
-                log::info!("registered global shortcut '{hotkey}'");
+                log::info!("registered global shortcut '{safe_hotkey}'");
             }
 
             let open_main_on_start = first_launch || conflict.is_some();
@@ -378,6 +433,7 @@ pub fn run() {
                 active_capture: Mutex::new(None),
                 pending_editor_draft: Mutex::new(None),
                 inflight_rewrites: Mutex::new(HashMap::new()),
+                latest_lint_req: Mutex::new(HashMap::new()),
                 settings: Mutex::new(loaded.settings),
                 settings_path: settings_file,
                 settings_recovered: loaded.recovered_from_corrupt,
@@ -392,7 +448,7 @@ pub fn run() {
 
             if open_main_on_start {
                 let _ = windows_mgr::open_or_focus_main(app.handle());
-                let _ = app.emit("main:navigate", initial_nav);
+                let _ = app.emit_to(WINDOW_MAIN, "main:navigate", initial_nav);
             }
 
             log::info!("{} started", app_info::APP_NAME);
@@ -411,4 +467,20 @@ pub fn run() {
             api.prevent_exit();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hotkey_validator_requires_modifier_and_valid_syntax() {
+        assert!(validate_hotkey_shortcut("Ctrl+Alt+G").is_ok());
+        assert!(validate_hotkey_shortcut("Ctrl+Shift+Space").is_ok());
+
+        assert!(validate_hotkey_shortcut("").is_err());
+        assert!(validate_hotkey_shortcut("A").is_err());
+        assert!(validate_hotkey_shortcut("Enter").is_err());
+        assert!(validate_hotkey_shortcut("Ctrl+NotARealKeyName").is_err());
+    }
 }

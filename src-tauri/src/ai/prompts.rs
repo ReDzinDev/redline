@@ -1,3 +1,6 @@
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
+
 /// Shared system prompt and all action instructions live in this single file.
 pub const SYSTEM_PROMPT: &str = "\
 You are a text-editing tool, not a chat assistant. You receive a task and the user's text inside \
@@ -94,6 +97,34 @@ pub fn restore_line_endings(text: &str, ending: LineEnding) -> String {
     }
 }
 
+/// Sanitizes untrusted model output so previewed text matches what is pasted verbatim:
+/// - Normalizes `\r\n` and bare `\r` to `\n`.
+/// - Strips interior NUL (`U+0000`), C0/C1 control codes (preserving only `\n` and `\t`), DEL,
+///   and Unicode BiDi override/isolate formatting characters that could spoof visual preview.
+pub fn sanitize_output_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            }
+            '\n' | '\t' => out.push(ch),
+            c if c.is_control() => {}
+            '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Computes `max_tokens`: estimated input tokens (chars / 3) * 2, floor 1024, cap 8192.
 /// Custom actions always receive the 8192 cap.
 pub fn compute_max_tokens(normalized_input: &str, is_custom: bool) -> u32 {
@@ -104,25 +135,24 @@ pub fn compute_max_tokens(normalized_input: &str, is_custom: bool) -> u32 {
     u32::try_from(est).unwrap_or(8192).clamp(1024, 8192)
 }
 
-/// Chooses `<text>` unless the user's text contains `</text` (case-insensitive), in which case
-/// a unique delimiter tag such as `text_9f3a` is picked so the text cannot break out of tags.
+/// Chooses `<text>` unless the user's text contains `</text` or `<text` (case-insensitive),
+/// in which case a randomized 64-bit tag such as `text_9f3a12b4c5d6e7f8` (seeded from OS entropy
+/// via `RandomState`) is picked so untrusted text cannot predict or break out of delimiter tags.
 pub fn choose_text_tag(user_text: &str) -> String {
     let lower = user_text.to_ascii_lowercase();
-    if !lower.contains("</text") {
+    if !lower.contains("</text") && !lower.contains("<text") {
         return "text".to_string();
     }
 
-    let mut hash: u32 = 0x811c_9dc5;
-    for b in user_text.as_bytes() {
-        hash ^= u32::from(*b);
-        hash = hash.wrapping_mul(0x0100_0193);
-    }
-
-    for attempt in 0u32..1000 {
-        let suffix = (hash.wrapping_add(attempt)) & 0xffff;
-        let candidate = format!("text_{suffix:04x}");
-        let closing = format!("</{candidate}");
-        if !lower.contains(&closing) {
+    for attempt in 0u64..1000 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write(user_text.as_bytes());
+        hasher.write_u64(attempt);
+        let suffix = hasher.finish();
+        let candidate = format!("text_{suffix:016x}");
+        let open = format!("<{candidate}");
+        let close = format!("</{candidate}");
+        if !lower.contains(&open) && !lower.contains(&close) {
             return candidate;
         }
     }
@@ -169,10 +199,11 @@ pub fn build_prompt(action: &Action, raw_input: &str) -> BuiltPrompt {
     }
 }
 
-/// Applies steps 1–3 of the safety net keeping LF line endings (for UI display and diffing).
+/// Applies steps 1–3 of the safety net keeping LF line endings (for UI display and diffing),
+/// after stripping unsafe control/NUL/BiDi characters.
 pub fn postprocess_reply_lf(raw_reply: &str, built: &BuiltPrompt) -> String {
-    let normalized_reply = raw_reply.replace("\r\n", "\n");
-    let mut text = normalized_reply.trim().to_string();
+    let sanitized_reply = sanitize_output_text(raw_reply);
+    let mut text = sanitized_reply.trim().to_string();
 
     // 1. Remove echoed wrapper tags.
     text = strip_wrapping_tag(&text, &built.tag);
@@ -336,5 +367,11 @@ mod tests {
         let built = build_prompt(&Action::FixGrammar, input);
         let reply = "\"Yes\" or \"no\"";
         assert_eq!(postprocess_reply(reply, &built), "\"Yes\" or \"no\"");
+    }
+
+    #[test]
+    fn sanitize_output_strips_nul_controls_and_bidi_while_keeping_tabs_and_newlines() {
+        let input = "Hello\0\x1b\x07\u{202e}\u{2066}\tWorld\r\nLine2\rLine3 🚀";
+        assert_eq!(sanitize_output_text(input), "Hello\tWorld\nLine2\nLine3 🚀");
     }
 }

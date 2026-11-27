@@ -168,7 +168,15 @@ export function MainApp() {
           />
         )}
 
-        {activeTab === "history" && <HistoryTab historyEnabled={settings.historyEnabled} />}
+        {activeTab === "history" && (
+          <HistoryTab
+            historyEnabled={settings.historyEnabled}
+            historyRecovered={status.historyRecovered}
+            onHistoryCleared={() =>
+              setStatus((prev) => (prev ? { ...prev, historyRecovered: false } : prev))
+            }
+          />
+        )}
 
         {activeTab === "settings" && (
           <SettingsTab

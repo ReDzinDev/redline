@@ -10,6 +10,8 @@ use crate::platform::{clipboard, focus, input, uia};
 
 const MODIFIER_WAIT_TIMEOUT: Duration = Duration::from_millis(300);
 const CLIPBOARD_COPY_TIMEOUT: Duration = Duration::from_millis(500);
+const WORKER_JOB_TIMEOUT: Duration = Duration::from_secs(3);
+const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureMethod {
@@ -64,17 +66,37 @@ impl CaptureError {
 enum WorkerJob {
     Capture {
         target: focus::TargetWindow,
+        cancel: Arc<AtomicBool>,
         reply: mpsc::Sender<Result<CapturedSelection, CaptureError>>,
     },
     Paste {
         target: focus::TargetWindow,
         text: String,
+        cancel: Arc<AtomicBool>,
         reply: mpsc::Sender<Result<PasteOutcome, CaptureError>>,
     },
     RestoreFocus {
         target: focus::TargetWindow,
+        cancel: Arc<AtomicBool>,
         reply: mpsc::Sender<bool>,
     },
+    CopyPlain {
+        text: String,
+        reply: mpsc::Sender<Result<(), CaptureError>>,
+    },
+    Shutdown {
+        reply: mpsc::Sender<()>,
+    },
+}
+
+/// Ensures `busy` is always released by the worker thread when a job finishes (even on panic),
+/// never prematurely by a timed-out caller while a Win32/clipboard operation is still executing.
+struct BusyResetGuard(Arc<AtomicBool>);
+
+impl Drop for BusyResetGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 /// Owns the single dedicated MTA COM platform worker thread for UIA capture and clipboard/paste.
@@ -97,24 +119,47 @@ impl PlatformWorker {
 
                 while let Ok(job) = rx.recv() {
                     match job {
-                        WorkerJob::Capture { target, reply } => {
-                            let res = run_capture(&uia_reader, target);
-                            busy_worker.store(false, Ordering::SeqCst);
+                        WorkerJob::Capture {
+                            target,
+                            cancel,
+                            reply,
+                        } => {
+                            let _guard = BusyResetGuard(Arc::clone(&busy_worker));
+                            let res = run_capture(&uia_reader, target, &cancel);
                             let _ = reply.send(res);
                         }
                         WorkerJob::Paste {
                             target,
                             text,
+                            cancel,
                             reply,
                         } => {
-                            let res = run_paste(&target, &text);
-                            busy_worker.store(false, Ordering::SeqCst);
+                            let _guard = BusyResetGuard(Arc::clone(&busy_worker));
+                            let res = run_paste(&target, &text, &cancel);
                             let _ = reply.send(res);
                         }
-                        WorkerJob::RestoreFocus { target, reply } => {
-                            let ok = focus::restore_focus(target.hwnd);
-                            busy_worker.store(false, Ordering::SeqCst);
+                        WorkerJob::RestoreFocus {
+                            target,
+                            cancel,
+                            reply,
+                        } => {
+                            let _guard = BusyResetGuard(Arc::clone(&busy_worker));
+                            let ok = if cancel.load(Ordering::SeqCst) {
+                                false
+                            } else {
+                                focus::restore_focus(target.hwnd, target.pid)
+                            };
                             let _ = reply.send(ok);
+                        }
+                        WorkerJob::CopyPlain { text, reply } => {
+                            let _guard = BusyResetGuard(Arc::clone(&busy_worker));
+                            let res =
+                                clipboard::write_plain_unicode_text(&text).map_err(map_clip_err);
+                            let _ = reply.send(res);
+                        }
+                        WorkerJob::Shutdown { reply } => {
+                            let _ = reply.send(());
+                            break;
                         }
                     }
                 }
@@ -141,11 +186,13 @@ impl PlatformWorker {
             return Err(CaptureError::Busy);
         }
 
+        let cancel = Arc::new(AtomicBool::new(false));
         let (reply_tx, reply_rx) = mpsc::channel();
         if self
             .tx
             .send(WorkerJob::Capture {
                 target,
+                cancel: Arc::clone(&cancel),
                 reply: reply_tx,
             })
             .is_err()
@@ -154,14 +201,15 @@ impl PlatformWorker {
             return Err(CaptureError::WorkerUnavailable);
         }
 
-        reply_rx.recv_timeout(Duration::from_secs(3)).map_err(|_| {
-            self.busy.store(false, Ordering::SeqCst);
+        reply_rx.recv_timeout(WORKER_JOB_TIMEOUT).map_err(|_| {
+            // Signal cancellation; do NOT clear `busy` until the worker finishes cleanup.
+            cancel.store(true, Ordering::SeqCst);
             CaptureError::Failed("capture timed out".to_string())
         })?
     }
 
     /// Returns focus to `target` and pastes `text` via delayed rendering with clipboard restore.
-    /// If focus cannot be restored, copies `text` normally so the user can Ctrl+V manually.
+    /// If focus cannot be restored or drifts, copies `text` normally so the user can Ctrl+V manually.
     pub fn paste_result(
         &self,
         target: focus::TargetWindow,
@@ -175,12 +223,14 @@ impl PlatformWorker {
             return Err(CaptureError::Busy);
         }
 
+        let cancel = Arc::new(AtomicBool::new(false));
         let (reply_tx, reply_rx) = mpsc::channel();
         if self
             .tx
             .send(WorkerJob::Paste {
                 target,
                 text,
+                cancel: Arc::clone(&cancel),
                 reply: reply_tx,
             })
             .is_err()
@@ -189,8 +239,9 @@ impl PlatformWorker {
             return Err(CaptureError::WorkerUnavailable);
         }
 
-        reply_rx.recv_timeout(Duration::from_secs(3)).map_err(|_| {
-            self.busy.store(false, Ordering::SeqCst);
+        reply_rx.recv_timeout(WORKER_JOB_TIMEOUT).map_err(|_| {
+            // Signal cancellation so a stalled worker aborts before firing late SendInput(Ctrl+V).
+            cancel.store(true, Ordering::SeqCst);
             CaptureError::Failed("paste timed out".to_string())
         })?
     }
@@ -205,11 +256,13 @@ impl PlatformWorker {
             return false;
         }
 
+        let cancel = Arc::new(AtomicBool::new(false));
         let (reply_tx, reply_rx) = mpsc::channel();
         if self
             .tx
             .send(WorkerJob::RestoreFocus {
                 target,
+                cancel: Arc::clone(&cancel),
                 reply: reply_tx,
             })
             .is_err()
@@ -220,28 +273,85 @@ impl PlatformWorker {
 
         reply_rx
             .recv_timeout(Duration::from_secs(1))
-            .unwrap_or(false)
+            .unwrap_or_else(|_| {
+                cancel.store(true, Ordering::SeqCst);
+                false
+            })
+    }
+
+    /// Serializes plain clipboard writes on the platform worker so they never race with an active
+    /// `ClipboardSnapshot` capture or delayed-render paste.
+    pub fn copy_plain_text(&self, text: String) -> Result<(), CaptureError> {
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(CaptureError::ClipboardBusy);
+        }
+
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(WorkerJob::CopyPlain {
+                text,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            self.busy.store(false, Ordering::SeqCst);
+            return Err(CaptureError::WorkerUnavailable);
+        }
+
+        reply_rx
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| CaptureError::ClipboardBusy)?
+    }
+
+    /// Waits briefly for any active capture/paste job to finish and restore the clipboard before exit.
+    pub fn shutdown(&self) {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        if self
+            .tx
+            .send(WorkerJob::Shutdown { reply: reply_tx })
+            .is_ok()
+        {
+            let _ = reply_rx.recv_timeout(WORKER_SHUTDOWN_TIMEOUT);
+        }
     }
 }
 
 fn run_capture(
     uia_reader: &uia::UiaReader,
     target: focus::TargetWindow,
+    cancel: &AtomicBool,
 ) -> Result<CapturedSelection, CaptureError> {
     if target.is_elevated {
         return Err(CaptureError::ElevatedTarget);
     }
+    if cancel.load(Ordering::SeqCst) || !focus::is_foreground_target(target.hwnd, target.pid) {
+        return Err(CaptureError::NothingSelected);
+    }
 
     // 1. Try UI Automation on the focused element (never touching clipboard) unless skipped.
     if !focus::should_skip_uia(&target.process_name)
-        && let Some(text) = uia_reader.read_focused_selection()
+        && let Some(text) = uia_reader.read_focused_selection(POPUP_MAX_INPUT_CHARS)
         && !text.is_empty()
     {
         return validate_captured(target, text, CaptureMethod::Uia);
     }
 
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CaptureError::Failed("capture cancelled".to_string()));
+    }
+
     // 2. Clipboard fallback with full RAII snapshot and automatic restore.
     input::wait_for_modifiers_released(MODIFIER_WAIT_TIMEOUT);
+
+    // Re-verify foreground target HWND + PID immediately before injecting synthetic Ctrl+C.
+    if cancel.load(Ordering::SeqCst) || !focus::is_foreground_target(target.hwnd, target.pid) {
+        return Err(CaptureError::NothingSelected);
+    }
 
     let snapshot = clipboard::ClipboardSnapshot::capture().map_err(map_clip_err)?;
     let seq_before = clipboard::sequence_number();
@@ -252,6 +362,9 @@ fn run_capture(
     let deadline = Instant::now() + CLIPBOARD_COPY_TIMEOUT;
     let mut seq_changed = false;
     while Instant::now() < deadline {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
         if clipboard::sequence_number() != seq_before {
             seq_changed = true;
             break;
@@ -259,17 +372,18 @@ fn run_capture(
         std::thread::sleep(Duration::from_millis(10));
     }
 
-    let captured_text = if seq_changed {
-        clipboard::read_unicode_text().map_err(map_clip_err)?
+    let read_res = if seq_changed && !cancel.load(Ordering::SeqCst) {
+        clipboard::read_unicode_text(POPUP_MAX_INPUT_CHARS).map_err(map_clip_err)
     } else {
-        None
+        Ok(None)
     };
 
-    // Always restore original clipboard immediately after reading.
+    // Always restore original clipboard immediately after reading, even on TooLarge error.
     if let Err(err) = snapshot.restore() {
         log::warn!("failed restoring clipboard after capture: {err}");
     }
 
+    let captured_text = read_res?;
     match captured_text {
         Some(text) if !text.is_empty() => validate_captured(target, text, CaptureMethod::Clipboard),
         _ => Err(CaptureError::NothingSelected),
@@ -292,11 +406,30 @@ fn validate_captured(
     })
 }
 
-fn run_paste(target: &focus::TargetWindow, text: &str) -> Result<PasteOutcome, CaptureError> {
-    if !focus::restore_focus(target.hwnd) {
+fn run_paste(
+    target: &focus::TargetWindow,
+    text: &str,
+    cancel: &AtomicBool,
+) -> Result<PasteOutcome, CaptureError> {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CaptureError::Failed("paste cancelled".to_string()));
+    }
+
+    // Never auto-paste multi-line text directly into a terminal emulator (newlines execute commands).
+    if focus::is_terminal_process(&target.process_name)
+        && (text.contains('\n') || text.contains('\r'))
+    {
+        log::info!(
+            "refusing auto-paste of multi-line text into terminal pid={}; using clipboard fallback",
+            target.pid
+        );
+        clipboard::write_plain_unicode_text(text).map_err(map_clip_err)?;
+        return Ok(PasteOutcome::CopiedFallback);
+    }
+
+    if !focus::restore_focus(target.hwnd, target.pid) {
         log::warn!(
-            "could not restore focus to {} (pid {}); copying result as fallback",
-            target.process_name,
+            "could not restore focus to pid={}; copying result as fallback",
             target.pid
         );
         clipboard::write_plain_unicode_text(text).map_err(map_clip_err)?;
@@ -307,13 +440,38 @@ fn run_paste(target: &focus::TargetWindow, text: &str) -> Result<PasteOutcome, C
     // before receiving Ctrl+V.
     std::thread::sleep(Duration::from_millis(30));
 
-    let rendered = clipboard::paste_with_delayed_rendering(text).map_err(map_clip_err)?;
-    Ok(PasteOutcome::Pasted { rendered })
+    if cancel.load(Ordering::SeqCst) || !focus::is_foreground_target(target.hwnd, target.pid) {
+        log::warn!(
+            "focus shifted before delayed paste for pid={}; copying result as fallback",
+            target.pid
+        );
+        clipboard::write_plain_unicode_text(text).map_err(map_clip_err)?;
+        return Ok(PasteOutcome::CopiedFallback);
+    }
+
+    match clipboard::paste_with_delayed_rendering(text, (target.hwnd, target.pid), cancel)
+        .map_err(map_clip_err)?
+    {
+        clipboard::DelayedPasteOutcome::Pasted { rendered } => {
+            Ok(PasteOutcome::Pasted { rendered })
+        }
+        clipboard::DelayedPasteOutcome::FocusLost => {
+            log::warn!(
+                "focus drifted during delayed paste setup for pid={}; copying result as fallback",
+                target.pid
+            );
+            clipboard::write_plain_unicode_text(text).map_err(map_clip_err)?;
+            Ok(PasteOutcome::CopiedFallback)
+        }
+    }
 }
 
 fn map_clip_err(err: clipboard::ClipboardError) -> CaptureError {
     match err {
         clipboard::ClipboardError::Busy => CaptureError::ClipboardBusy,
+        clipboard::ClipboardError::TooLarge { char_count } => {
+            CaptureError::SelectionTooLong { char_count }
+        }
         clipboard::ClipboardError::Os(msg) => CaptureError::Failed(msg),
     }
 }

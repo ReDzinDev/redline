@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ai::prompts::{Action, Tone};
 use crate::ai::provider::{AiError, ReasoningMode};
+use crate::app_info::CUSTOM_INSTRUCTION_MAX_CHARS;
 use crate::settings::Settings;
 
 /// Current high-level app status returned to the UI.
@@ -165,6 +166,12 @@ impl ActionRequestDto {
                             Some("Custom instruction cannot be empty".to_string()),
                         )
                     })?;
+                if instruction.chars().count() > CUSTOM_INSTRUCTION_MAX_CHARS {
+                    return Err(ApiErrorDto::new(
+                        "invalid_action",
+                        Some("Custom instruction is too long".to_string()),
+                    ));
+                }
                 Ok(Action::Custom(instruction.to_string()))
             }
             _ => Err(ApiErrorDto::new("invalid_action", None)),

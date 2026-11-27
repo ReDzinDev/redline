@@ -7,7 +7,14 @@ interface DiffViewProps {
 }
 
 export function DiffView({ original, modified }: DiffViewProps) {
-  const parts = useMemo(() => diffWordsWithSpace(original, modified), [original, modified]);
+  const parts = useMemo(
+    () =>
+      diffWordsWithSpace(original, modified, { timeout: 250, maxEditLength: 4000 }) ?? [
+        { removed: true, added: false, value: original },
+        { added: true, removed: false, value: modified },
+      ],
+    [original, modified],
+  );
 
   return (
     <div className="text-sm leading-relaxed whitespace-pre-wrap text-ink">

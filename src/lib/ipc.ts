@@ -293,10 +293,12 @@ export function resizePopup(expanded: boolean): Promise<void> {
 }
 
 export function acceptPopupResult(
+  sessionId: number,
   text: string,
   historyMeta?: AcceptHistoryMetaDto,
 ): Promise<AcceptResultDto> {
   return invoke<AcceptResultDto>("accept_popup_result", {
+    sessionId,
     text,
     historyMeta: historyMeta ?? null,
   });

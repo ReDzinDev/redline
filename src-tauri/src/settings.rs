@@ -1,13 +1,15 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::ai::provider::ReasoningMode;
-use crate::app_info::{DEFAULT_HOTKEY, DEFAULT_MODEL};
+use crate::app_info::{CUSTOM_INSTRUCTION_MAX_CHARS, DEFAULT_HOTKEY, DEFAULT_MODEL};
 
 pub const SETTINGS_VERSION: u32 = 1;
 pub const MAX_RECENT_CUSTOM_INSTRUCTIONS: usize = 5;
+const MAX_SETTINGS_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -52,16 +54,19 @@ impl Settings {
             .unwrap_or(&self.model)
     }
 
-    /// Remembers the last 5 distinct custom instructions (newest first).
+    /// Remembers the last 5 distinct custom instructions (newest first), capped in length.
     pub fn push_recent_custom_instruction(&mut self, instruction: &str) {
-        let trimmed = instruction.trim();
+        let trimmed: String = instruction
+            .trim()
+            .chars()
+            .take(CUSTOM_INSTRUCTION_MAX_CHARS)
+            .collect();
         if trimmed.is_empty() {
             return;
         }
         self.recent_custom_instructions
-            .retain(|existing| !existing.eq_ignore_ascii_case(trimmed));
-        self.recent_custom_instructions
-            .insert(0, trimmed.to_string());
+            .retain(|existing| !existing.eq_ignore_ascii_case(&trimmed));
+        self.recent_custom_instructions.insert(0, trimmed);
         self.recent_custom_instructions
             .truncate(MAX_RECENT_CUSTOM_INSTRUCTIONS);
     }
@@ -88,6 +93,20 @@ pub fn load_from_path(path: &Path) -> LoadedSettings {
         };
     }
 
+    if let Ok(meta) = fs::metadata(path)
+        && meta.len() > MAX_SETTINGS_FILE_BYTES
+    {
+        log::warn!(
+            "settings file exceeds size cap ({} bytes); backing up and loading defaults",
+            meta.len()
+        );
+        backup_corrupt_file(path);
+        return LoadedSettings {
+            settings: Settings::default(),
+            recovered_from_corrupt: true,
+        };
+    }
+
     match fs::read_to_string(path) {
         Ok(raw) => match serde_json::from_str::<Settings>(&raw) {
             Ok(mut parsed) => {
@@ -103,13 +122,21 @@ pub fn load_from_path(path: &Path) -> LoadedSettings {
                 parsed
                     .recent_custom_instructions
                     .truncate(MAX_RECENT_CUSTOM_INSTRUCTIONS);
+                for item in &mut parsed.recent_custom_instructions {
+                    *item = item.chars().take(CUSTOM_INSTRUCTION_MAX_CHARS).collect();
+                }
                 LoadedSettings {
                     settings: parsed,
                     recovered_from_corrupt: false,
                 }
             }
             Err(err) => {
-                log::warn!("settings JSON invalid ({err}); backing up and loading defaults");
+                log::warn!(
+                    "settings JSON invalid (kind={:?} line={} col={}); backing up and loading defaults",
+                    err.classify(),
+                    err.line(),
+                    err.column()
+                );
                 backup_corrupt_file(path);
                 LoadedSettings {
                     settings: Settings::default(),
@@ -118,7 +145,10 @@ pub fn load_from_path(path: &Path) -> LoadedSettings {
             }
         },
         Err(err) => {
-            log::warn!("failed reading settings file ({err}); loading defaults");
+            log::warn!(
+                "failed reading settings file ({}); loading defaults",
+                err.kind()
+            );
             backup_corrupt_file(path);
             LoadedSettings {
                 settings: Settings::default(),
@@ -135,21 +165,19 @@ pub fn save_to_path(path: &Path, settings: &Settings) -> std::io::Result<()> {
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
     let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, serialized)?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(serialized.as_bytes())?;
+        file.sync_all()?;
     }
-    fs::rename(tmp_path, path)?;
+    fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
 fn backup_corrupt_file(path: &Path) {
     let bad_path = path.with_file_name("settings.bad.json");
-    if bad_path.exists() {
-        let _ = fs::remove_file(&bad_path);
-    }
     if let Err(err) = fs::rename(path, &bad_path) {
-        log::warn!("could not rename corrupt settings file: {err}");
+        log::warn!("could not rename corrupt settings file: {}", err.kind());
     }
 }
 

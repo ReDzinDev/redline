@@ -12,6 +12,11 @@ use crate::dto::KeyTestResultDto;
 pub const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DATA_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TOTAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+const MAX_KEY_BODY_BYTES: usize = 64 * 1024;
+const MAX_MODELS_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// OpenAI-compatible streaming client configured by URL, headers, and extra body fields.
 /// Configured for OpenRouter in Phase 1; covers OpenAI, Groq, Gemini, LM Studio and Ollama later.
@@ -79,12 +84,44 @@ impl ChatClient {
 
 fn build_http_client() -> Result<reqwest::Client, AiError> {
     reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(DATA_IDLE_TIMEOUT)
+        .timeout(TOTAL_REQUEST_TIMEOUT)
         .build()
         .map_err(|err| AiError::TimeoutOrNetwork {
             message: Some(err.to_string()),
         })
+}
+
+async fn read_bounded_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AiError> {
+    let mut buf = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|err| AiError::TimeoutOrNetwork {
+            message: Some(err.to_string()),
+        })?
+    {
+        if buf.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(AiError::TimeoutOrNetwork {
+                message: Some("Provider response exceeded size limit".to_string()),
+            });
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+async fn read_bounded_error_text(response: reqwest::Response) -> String {
+    match read_bounded_bytes(response, MAX_ERROR_BODY_BYTES).await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
 }
 
 impl Provider for ChatClient {
@@ -120,7 +157,7 @@ impl Provider for ChatClient {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .map(ToOwned::to_owned);
-            let error_body = response.text().await.unwrap_or_default();
+            let error_body = read_bounded_error_text(response).await;
             return Err(map_http_error(
                 status.as_u16(),
                 &error_body,
@@ -204,7 +241,7 @@ pub async fn test_openrouter_key(api_key: &str) -> Result<KeyTestResultDto, AiEr
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
-        let body = response.text().await.unwrap_or_default();
+        let body = read_bounded_error_text(response).await;
         return Err(map_http_error(
             status.as_u16(),
             &body,
@@ -212,13 +249,11 @@ pub async fn test_openrouter_key(api_key: &str) -> Result<KeyTestResultDto, AiEr
         ));
     }
 
+    let body = read_bounded_bytes(response, MAX_KEY_BODY_BYTES).await?;
     let parsed: OpenRouterKeyEnvelope =
-        response
-            .json()
-            .await
-            .map_err(|err| AiError::TimeoutOrNetwork {
-                message: Some(err.to_string()),
-            })?;
+        serde_json::from_slice(&body).map_err(|err| AiError::TimeoutOrNetwork {
+            message: Some(format!("Invalid key check response ({:?})", err.classify())),
+        })?;
 
     Ok(KeyTestResultDto {
         label: parsed.data.label,
@@ -239,9 +274,9 @@ pub async fn validate_custom_model(
     api_key: Option<&str>,
 ) -> Result<ReasoningMode, AiError> {
     let target = model_id.trim();
-    if target.is_empty() {
+    if target.is_empty() || target.len() > 128 || !target.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(AiError::BadRequest {
-            message: Some("Model ID cannot be empty".to_string()),
+            message: Some("Model ID must be a valid non-empty identifier".to_string()),
         });
     }
 
@@ -263,7 +298,7 @@ pub async fn validate_custom_model(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .map(ToOwned::to_owned);
-        let body = response.text().await.unwrap_or_default();
+        let body = read_bounded_error_text(response).await;
         return Err(map_http_error(
             status.as_u16(),
             &body,
@@ -271,13 +306,11 @@ pub async fn validate_custom_model(
         ));
     }
 
+    let body = read_bounded_bytes(response, MAX_MODELS_BODY_BYTES).await?;
     let parsed: ModelsListEnvelope =
-        response
-            .json()
-            .await
-            .map_err(|err| AiError::TimeoutOrNetwork {
-                message: Some(err.to_string()),
-            })?;
+        serde_json::from_slice(&body).map_err(|err| AiError::TimeoutOrNetwork {
+            message: Some(format!("Invalid catalog response ({:?})", err.classify())),
+        })?;
 
     let found = parsed
         .data

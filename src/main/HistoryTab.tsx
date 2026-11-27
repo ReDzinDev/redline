@@ -6,9 +6,15 @@ import { formatCostUsd, formatSourceAppLabel } from "../lib/popupLogic";
 
 interface HistoryTabProps {
   historyEnabled: boolean;
+  historyRecovered?: boolean;
+  onHistoryCleared?: () => void;
 }
 
-export function HistoryTab({ historyEnabled }: HistoryTabProps) {
+export function HistoryTab({
+  historyEnabled,
+  historyRecovered = false,
+  onHistoryCleared,
+}: HistoryTabProps) {
   const [entries, setEntries] = useState<HistoryEntryDto[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -28,6 +34,7 @@ export function HistoryTab({ historyEnabled }: HistoryTabProps) {
       await clearHistory();
       setEntries([]);
       setExpandedId(null);
+      onHistoryCleared?.();
     } catch {
       // Ignore clear error
     }
@@ -57,7 +64,7 @@ export function HistoryTab({ historyEnabled }: HistoryTabProps) {
         <span className="text-xs text-ink-muted">
           {entries.length > 0 ? `${entries.length} / 20` : ""}
         </span>
-        {entries.length > 0 && (
+        {(entries.length > 0 || historyRecovered) && (
           <button
             type="button"
             onClick={handleClear}

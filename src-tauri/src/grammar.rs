@@ -15,6 +15,24 @@ struct LinterState {
     group: LintGroup,
 }
 
+/// Upstream `harper-core 3.2.0` rules that execute unguarded `eprintln!`/`println!` printing
+/// verbatim user text clauses to stdout/stderr. Disabled to preserve Redline's zero-user-text
+/// diagnostic guarantee.
+const NOISY_STDIO_HARPER_RULES: &[&str] = &[
+    "SeemsLikeAdjective",
+    "ExpandIme",
+    "ChickenAndEgg",
+    "LookingForwardTo",
+];
+
+fn build_curated_lint_group(dict: Arc<FstDictionary>, dialect: Dialect) -> LintGroup {
+    let mut group = LintGroup::new_curated(dict, dialect);
+    for &rule in NOISY_STDIO_HARPER_RULES {
+        group.config.set_rule_enabled(rule, false);
+    }
+    group
+}
+
 /// Manages a lazily built Harper `LintGroup` behind a `Mutex`.
 /// Changing dialect replaces the `LintGroup` while reusing the curated `FstDictionary`.
 pub struct GrammarEngine {
@@ -44,7 +62,7 @@ impl GrammarEngine {
         if let Some(state) = guard.as_mut()
             && state.dialect != next
         {
-            state.group = LintGroup::new_curated(Arc::clone(&state.dict), next);
+            state.group = build_curated_lint_group(Arc::clone(&state.dict), next);
             state.dialect = next;
             log::info!("rebuilt Harper linter for dialect={dialect_name}");
         }
@@ -74,7 +92,7 @@ impl GrammarEngine {
         let state = guard.get_or_insert_with(|| {
             let init_start = Instant::now();
             let dict = FstDictionary::curated();
-            let group = LintGroup::new_curated(Arc::clone(&dict), target_dialect);
+            let group = build_curated_lint_group(Arc::clone(&dict), target_dialect);
             log::info!(
                 "initialized Harper linter in {} ms",
                 init_start.elapsed().as_millis()
@@ -87,7 +105,7 @@ impl GrammarEngine {
         });
 
         if state.dialect != target_dialect {
-            state.group = LintGroup::new_curated(Arc::clone(&state.dict), target_dialect);
+            state.group = build_curated_lint_group(Arc::clone(&state.dict), target_dialect);
             state.dialect = target_dialect;
         }
 
@@ -371,6 +389,18 @@ mod tests {
             let sliced = String::from_utf16(&utf16[lint.start..lint.end]).expect("valid utf16");
             assert_eq!(sliced, lint.flagged);
             prev_end = lint.end;
+        }
+    }
+
+    #[test]
+    fn disables_noisy_stdio_harper_rules() {
+        let dict = FstDictionary::curated();
+        let group = build_curated_lint_group(dict, Dialect::American);
+        for &rule in NOISY_STDIO_HARPER_RULES {
+            assert!(
+                !group.config.is_rule_enabled(rule),
+                "expected noisy Harper rule {rule} to be disabled"
+            );
         }
     }
 }

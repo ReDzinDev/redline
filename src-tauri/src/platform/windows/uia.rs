@@ -2,9 +2,13 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationTextPattern, IUIAutomationTextPattern2,
-    UIA_TextPattern2Id, UIA_TextPatternId,
+    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationTextPattern,
+    IUIAutomationTextPattern2, UIA_TextPattern2Id, UIA_TextPatternId,
 };
+use windows::core::Interface;
+
+const MAX_UIA_RANGES: i32 = 64;
+const UIA_TIMEOUT_MS: u32 = 1500;
 
 /// Initializes MTA COM on the current platform worker thread.
 /// Safe to call even if COM was already initialized on this thread.
@@ -32,17 +36,27 @@ impl UiaReader {
             )
         }
         .ok();
-        if automation.is_none() {
+        if let Some(ref uia) = automation {
+            // Bound cross-process UIA COM calls so a hung provider cannot stall the worker for 20s.
+            if let Ok(uia2) = uia.cast::<IUIAutomation2>() {
+                unsafe {
+                    let _ = uia2.SetConnectionTimeout(UIA_TIMEOUT_MS);
+                    let _ = uia2.SetTransactionTimeout(UIA_TIMEOUT_MS);
+                }
+            }
+        } else {
             log::warn!("failed to create IUIAutomation instance; will use clipboard fallback");
         }
         Self { automation }
     }
 
-    /// Reads selected text from the focused UI Automation element ONLY.
+    /// Reads selected text from the focused UI Automation element ONLY, capped at `max_chars + 1`
+    /// characters so an untrusted provider cannot trigger unbounded cross-process allocations.
     /// Deliberately never walks the UIA tree (walking Chromium/Electron trees can push them
     /// into a heavier accessibility mode).
-    pub fn read_focused_selection(&self) -> Option<String> {
+    pub fn read_focused_selection(&self, max_chars: usize) -> Option<String> {
         let uia = self.automation.as_ref()?;
+        let cap = max_chars.saturating_add(1);
 
         // SAFETY: Standard UIA COM calls on the focused element only.
         unsafe {
@@ -64,12 +78,22 @@ impl UiaReader {
                 return None;
             }
 
+            let bounded_count = count.min(MAX_UIA_RANGES);
             let mut collected = String::new();
-            for i in 0..count {
+            let mut collected_chars: usize = 0;
+
+            for i in 0..bounded_count {
+                let remaining = cap.saturating_sub(collected_chars);
+                if remaining == 0 {
+                    break;
+                }
+                let max_len = i32::try_from(remaining).unwrap_or(i32::MAX);
                 if let Ok(range) = ranges.GetElement(i)
-                    && let Ok(bstr) = range.GetText(-1)
+                    && let Ok(bstr) = range.GetText(max_len)
                 {
-                    collected.push_str(&bstr.to_string());
+                    let part = bstr.to_string();
+                    collected_chars = collected_chars.saturating_add(part.chars().count());
+                    collected.push_str(&part);
                 }
             }
 
