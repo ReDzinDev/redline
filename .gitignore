@@ -7,11 +7,17 @@ dist/
 src-tauri/target/
 src-tauri/gen/schemas/
 
-# Logs and local state
+# Logs, secrets, and local state
 *.log
 *.bad.json
 .env
 .env.*
+*.pfx
+*.p12
+*.pem
+*.key
+.tauri/
+credentials.json
 
 # Editor and OS files
 .DS_Store

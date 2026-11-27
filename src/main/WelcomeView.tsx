@@ -70,12 +70,16 @@ export function WelcomeView({ status, onComplete }: WelcomeViewProps) {
     setBusy(true);
     setFeedback(null);
     try {
-      if (keyInput.trim().length > 0 && !hasKey) {
-        await saveApiKey(keyInput);
+      const pendingKey = keyInput.trim();
+      let finalHasKey = hasKey;
+      if (pendingKey.length > 0 && !hasKey) {
+        await saveApiKey(pendingKey);
         setHasKey(true);
+        setKeyInput("");
+        finalHasKey = true;
       }
       await completeWelcome();
-      onComplete({ hasApiKey: hasKey || keyInput.trim().length > 0, autostartEnabled: autostart });
+      onComplete({ hasApiKey: finalHasKey, autostartEnabled: autostart });
     } catch (err: unknown) {
       const msg = isApiError(err) ? formatApiError(err).headline : String(err);
       setFeedback({ kind: "error", text: msg });

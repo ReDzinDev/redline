@@ -90,6 +90,7 @@ export function PopupApp() {
   const [highlightedLintId, setHighlightedLintId] = useState<string | null>(null);
   const [lintsExpandedDuringResult, setLintsExpandedDuringResult] = useState(false);
 
+  const sessionIdRef = useRef(0);
   const aiRequestIdRef = useRef(0);
   const lintRequestIdRef = useRef(0);
   const expandedRef = useRef(false);
@@ -189,6 +190,7 @@ export function PopupApp() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     listenPopupSession((evt) => {
+      sessionIdRef.current = evt.sessionId;
       aiRequestIdRef.current += 1;
       lintRequestIdRef.current += 1;
       setCopied(false);
@@ -345,7 +347,7 @@ export function PopupApp() {
   const handleAcceptText = useCallback(
     async (textToPaste: string, historyMeta: AcceptHistoryMetaDto) => {
       try {
-        const res = await acceptPopupResult(textToPaste, historyMeta);
+        const res = await acceptPopupResult(sessionIdRef.current, textToPaste, historyMeta);
         if (res.outcome === "copied_fallback") {
           setFallbackNotice({ kind: "info", text: MESSAGES.popup.copiedFallbackNotice });
         }
