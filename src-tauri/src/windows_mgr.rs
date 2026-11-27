@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use tauri::webview::NewWindowResponse;
 use tauri::{
     AppHandle, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
@@ -13,17 +14,23 @@ use crate::app_info::{
 };
 use crate::platform::placement;
 
-/// Navigation guard: rejects any URL that does not belong to Redline's own app origin.
+/// Navigation guard: rejects any URL that does not belong to Redline's exact bundled app origin.
 /// CSP cannot prevent top-level navigation, so every webview attaches this check.
+/// Rejects userinfo, non-default ports, and `https://tauri.localhost` (since `use_https_scheme`
+/// is disabled and `wry` only intercepts `http://tauri.*` on Windows).
 pub fn is_allowed_app_url(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+
     let scheme = url.scheme();
     let host = url.host_str();
 
-    if matches!(scheme, "tauri" | "http" | "https") && host == Some("tauri.localhost") {
+    if scheme == "http" && host == Some("tauri.localhost") && url.port().is_none() {
         return true;
     }
 
-    if scheme == "tauri" && host == Some("localhost") {
+    if scheme == "tauri" && host == Some("localhost") && url.port().is_none() {
         return true;
     }
 
@@ -48,7 +55,7 @@ pub fn open_or_focus_main(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(app, WINDOW_MAIN, WebviewUrl::App(MAIN_ENTRY.into()))
+    let window = WebviewWindowBuilder::new(app, WINDOW_MAIN, WebviewUrl::App(MAIN_ENTRY.into()))
         .title(APP_NAME)
         .inner_size(860.0, 620.0)
         .min_inner_size(640.0, 480.0)
@@ -60,13 +67,26 @@ pub fn open_or_focus_main(app: &AppHandle) -> tauri::Result<()> {
             }
             allowed
         })
+        .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()?;
+
+    configure_hardened_webview(&window, false);
+
+    let app_handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(
+            event,
+            WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed
+        ) {
+            crate::cancel_inflight(&app_handle.state::<AppState>(), WINDOW_MAIN);
+        }
+    });
 
     Ok(())
 }
 
 /// Pre-creates the frameless inline popup window hidden at startup so hotkey-to-popup is instant.
-/// Disables WebView2 browser accelerator keys and enables low-memory mode while hidden.
+/// Hardens WebView2 settings and enables low-memory mode while hidden.
 pub fn precreate_popup(app: &AppHandle) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, WINDOW_POPUP, WebviewUrl::App(POPUP_ENTRY.into()))
         .title(APP_NAME)
@@ -89,16 +109,22 @@ pub fn precreate_popup(app: &AppHandle) -> tauri::Result<()> {
             }
             allowed
         })
+        .on_new_window(|_, _| NewWindowResponse::Deny)
         .build()?;
 
-    configure_popup_webview(&window);
+    configure_hardened_webview(&window, true);
 
     let app_handle = app.clone();
     window.on_window_event(move |event| match event {
         WindowEvent::CloseRequested { api, .. } => {
-            // Keep pre-created popup alive; hiding puts it back in low-memory mode.
+            // Keep pre-created popup alive; hiding puts it back in low-memory mode and clears capture.
             api.prevent_close();
-            crate::cancel_inflight(&app_handle.state::<AppState>(), WINDOW_POPUP);
+            let state = app_handle.state::<AppState>();
+            crate::cancel_inflight(&state, WINDOW_POPUP);
+            *state
+                .active_capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             hide_popup(&app_handle);
         }
         WindowEvent::Focused(false) => {
@@ -119,22 +145,35 @@ pub fn precreate_popup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 #[cfg(windows)]
-fn configure_popup_webview(window: &WebviewWindow) {
+fn configure_hardened_webview(window: &WebviewWindow, low_memory: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, ICoreWebView2_19, ICoreWebView2Settings3,
+        ICoreWebView2Settings4,
     };
     use windows::core::Interface;
 
-    let _ = window.with_webview(|wv| unsafe {
+    let _ = window.with_webview(move |wv| unsafe {
         let controller = wv.controller();
         if let Ok(core) = controller.CoreWebView2() {
-            if let Ok(settings) = core.Settings()
-                && let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>()
-                && let Err(err) = settings3.SetAreBrowserAcceleratorKeysEnabled(false)
-            {
-                log::warn!("failed disabling WebView2 accelerator keys: {err}");
+            if let Ok(settings) = core.Settings() {
+                if let Err(err) = settings.SetAreDefaultContextMenusEnabled(false) {
+                    log::warn!("failed disabling WebView2 default context menus: {err}");
+                }
+                if let Ok(settings3) = settings.cast::<ICoreWebView2Settings3>()
+                    && let Err(err) = settings3.SetAreBrowserAcceleratorKeysEnabled(false)
+                {
+                    log::warn!("failed disabling WebView2 accelerator keys: {err}");
+                }
+                if let Ok(settings4) = settings.cast::<ICoreWebView2Settings4>() {
+                    if let Err(err) = settings4.SetIsGeneralAutofillEnabled(false) {
+                        log::warn!("failed disabling WebView2 general autofill: {err}");
+                    }
+                    if let Err(err) = settings4.SetIsPasswordAutosaveEnabled(false) {
+                        log::warn!("failed disabling WebView2 password autosave: {err}");
+                    }
+                }
             }
-            if let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
+            if low_memory && let Ok(wv19) = core.cast::<ICoreWebView2_19>() {
                 let _ = wv19.SetMemoryUsageTargetLevel(COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW);
             }
         }
@@ -142,7 +181,7 @@ fn configure_popup_webview(window: &WebviewWindow) {
 }
 
 #[cfg(not(windows))]
-fn configure_popup_webview(_window: &WebviewWindow) {}
+fn configure_hardened_webview(_window: &WebviewWindow, _low_memory: bool) {}
 
 #[cfg(windows)]
 pub fn set_popup_webview_state(window: &WebviewWindow, visible: bool) {
@@ -368,10 +407,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn allows_tauri_app_origins() {
+    fn allows_exact_tauri_app_origins_only() {
         for raw in [
             "http://tauri.localhost/index.html",
-            "https://tauri.localhost/popup.html",
+            "http://tauri.localhost/popup.html",
             "tauri://localhost/index.html",
         ] {
             let url = Url::parse(raw).expect("valid test URL");
@@ -380,8 +419,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_external_and_dangerous_urls() {
+    fn rejects_external_non_default_ports_https_and_userinfo_urls() {
         for raw in [
+            "https://tauri.localhost/popup.html",
+            "https://tauri.localhost:8443/index.html",
+            "http://tauri.localhost:8080/index.html",
+            "http://user@tauri.localhost/index.html",
+            "http://user:pass@tauri.localhost/index.html",
+            "tauri://localhost:1234/index.html",
             "https://example.com/",
             "http://example.com/",
             "https://openrouter.ai/keys",
@@ -399,6 +444,10 @@ mod tests {
     fn dev_origin_allowed_only_in_debug_builds() {
         let url = Url::parse("http://localhost:1420/index.html").expect("valid dev URL");
         assert_eq!(is_allowed_app_url(&url), cfg!(debug_assertions));
+
+        let with_userinfo =
+            Url::parse("http://user@localhost:1420/index.html").expect("valid userinfo URL");
+        assert!(!is_allowed_app_url(&with_userinfo));
 
         let wrong_port = Url::parse("http://localhost:3000/").expect("valid URL");
         assert!(!is_allowed_app_url(&wrong_port));

@@ -9,7 +9,10 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 use crate::{
     AppState,
-    app_info::{APP_NAME, TRAY_ID, TRAY_OPEN_ID, TRAY_PAUSE_ID, TRAY_QUIT_ID, TRAY_SETTINGS_ID},
+    app_info::{
+        APP_NAME, TRAY_ID, TRAY_OPEN_ID, TRAY_PAUSE_ID, TRAY_QUIT_ID, TRAY_SETTINGS_ID,
+        WINDOW_MAIN, WINDOW_POPUP, sanitize_log_value,
+    },
     windows_mgr,
 };
 
@@ -38,13 +41,13 @@ pub fn setup(app: &App) -> tauri::Result<()> {
                 if let Err(err) = windows_mgr::open_or_focus_main(app) {
                     log::error!("failed to open main window from tray: {err}");
                 }
-                let _ = app.emit("main:navigate", "write");
+                let _ = app.emit_to(WINDOW_MAIN, "main:navigate", "write");
             }
             TRAY_SETTINGS_ID => {
                 if let Err(err) = windows_mgr::open_or_focus_main(app) {
                     log::error!("failed to open main window on settings: {err}");
                 }
-                let _ = app.emit("main:navigate", "settings");
+                let _ = app.emit_to(WINDOW_MAIN, "main:navigate", "settings");
             }
             TRAY_PAUSE_ID => {
                 let state = app.state::<AppState>();
@@ -56,12 +59,13 @@ pub fn setup(app: &App) -> tauri::Result<()> {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .hotkey
                     .clone();
+                let safe_hotkey = sanitize_log_value(&hotkey, 64);
 
                 if next_paused {
                     let _ = app.global_shortcut().unregister(hotkey.as_str());
                     state.hotkey_paused.store(true, Ordering::SeqCst);
                     let _ = pause_for_handler.set_checked(true);
-                    log::info!("paused global hotkey '{hotkey}'");
+                    log::info!("paused global hotkey '{safe_hotkey}'");
                 } else {
                     match app.global_shortcut().register(hotkey.as_str()) {
                         Ok(()) => {
@@ -71,10 +75,10 @@ pub fn setup(app: &App) -> tauri::Result<()> {
                                 .hotkey_conflict
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                            log::info!("resumed global hotkey '{hotkey}'");
+                            log::info!("resumed global hotkey '{safe_hotkey}'");
                         }
                         Err(err) => {
-                            log::warn!("failed to resume global hotkey '{hotkey}': {err}");
+                            log::warn!("failed to resume global hotkey '{safe_hotkey}': {err}");
                             let _ = pause_for_handler.set_checked(true);
                             *state
                                 .hotkey_conflict
@@ -82,15 +86,18 @@ pub fn setup(app: &App) -> tauri::Result<()> {
                                 .unwrap_or_else(std::sync::PoisonError::into_inner) =
                                 Some(hotkey.clone());
                             let _ = windows_mgr::open_or_focus_main(app);
-                            let _ = app.emit("main:navigate", "settings");
+                            let _ = app.emit_to(WINDOW_MAIN, "main:navigate", "settings");
                         }
                     }
                 }
             }
             TRAY_QUIT_ID => {
-                app.state::<AppState>()
-                    .quitting
-                    .store(true, Ordering::SeqCst);
+                let state = app.state::<AppState>();
+                state.quitting.store(true, Ordering::SeqCst);
+                crate::cancel_inflight(&state, WINDOW_POPUP);
+                crate::cancel_inflight(&state, WINDOW_MAIN);
+                // Drain any in-flight capture/paste job so ClipboardSnapshot restores cleanly.
+                state.worker.shutdown();
                 app.exit(0);
             }
             _ => {}
@@ -106,7 +113,7 @@ pub fn setup(app: &App) -> tauri::Result<()> {
                 if let Err(err) = windows_mgr::open_or_focus_main(app) {
                     log::error!("failed to open main window from tray click: {err}");
                 }
-                let _ = app.emit("main:navigate", "write");
+                let _ = app.emit_to(WINDOW_MAIN, "main:navigate", "write");
             }
         });
 
