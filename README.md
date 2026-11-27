@@ -4,7 +4,7 @@ Lightweight Windows writing assistant for instant offline grammar checks and AI 
 
 Select text anywhere on Windows, press **`Ctrl+Alt+G`**, fix typos offline with [Harper](https://writewithharper.com) or run an AI rewrite via [OpenRouter](https://openrouter.ai), inspect the word-level diff, and press **`Enter`** to replace the text in place — without disturbing your clipboard or Win+V history.
 
-> **Demo GIF placeholder:** `docs/demo.gif` — to be recorded after the visual design pass.
+![Redline inline grammar and AI rewrite demo](docs/demo.gif)
 
 ## Features
 
@@ -17,7 +17,7 @@ Select text anywhere on Windows, press **`Ctrl+Alt+G`**, fix typos offline with 
 
 ## Install & Build from Source
 
-Unsigned release builds (Phase 1 `v0.1.0`) will be attached to GitHub Releases. Because Phase 1 builds are unsigned, Windows SmartScreen may prompt before running the binary.
+Unsigned Windows installer builds (Phase 1 `v0.1.0`) are published on GitHub Releases or can be built directly from source below. Because Phase 1 builds are unsigned, Windows SmartScreen may prompt before running the installer.
 
 ### Prerequisites
 
@@ -91,7 +91,7 @@ To report a security issue privately, see [SECURITY.md](SECURITY.md).
 
 ## Roadmap (Phase 2)
 
-- Visual design pass (final palette, typography, spacing, and iconography via `src/styles/tokens.css`)
+- Custom theme presets and expanded iconography
 - Personal dictionary and per-rule grammar toggles
 - Optional Zero Data Retention (`zdr`) provider filter
 - Additional direct providers (OpenAI, Groq, Gemini, Ollama, LM Studio) on the existing `ChatClient`
