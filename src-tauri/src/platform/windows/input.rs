@@ -102,9 +102,8 @@ pub fn send_copy(ctrl_shift_c: bool) {
     }
 }
 
-/// Simulates `Ctrl+V` after ensuring no stale modifier keys remain held.
-pub fn send_paste() {
-    wait_for_modifiers_released(Duration::from_millis(150));
+/// Simulates `Ctrl+V` immediately (caller must wait for modifiers released and verify foreground target first).
+pub fn send_paste_keys() {
     let inputs = [
         key_input(VK_CONTROL, false),
         key_input(VK_V, false),
