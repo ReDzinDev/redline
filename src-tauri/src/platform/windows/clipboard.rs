@@ -750,8 +750,10 @@ mod tests {
     fn encode_utf16_nul_strips_interior_nul_code_units() {
         let encoded = encode_utf16_nul("abc\0def");
         let units: Vec<u16> = encoded
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect();
         assert_eq!(units.last(), Some(&0u16));
         assert!(!units[..units.len() - 1].contains(&0u16));
