@@ -1,11 +1,16 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::app_info::{EDITOR_MAX_INPUT_CHARS, sanitize_log_value};
+
 pub const HISTORY_VERSION: u32 = 1;
 pub const MAX_HISTORY_ENTRIES: usize = 20;
+const MAX_HISTORY_FILE_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_META_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,13 +67,37 @@ pub fn history_path(data_dir: &Path) -> PathBuf {
     data_dir.join("history.json")
 }
 
+fn corrupt_backup_path(path: &Path) -> PathBuf {
+    path.with_file_name("history.bad.json")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
+}
+
 impl HistoryStore {
     pub fn load_from_path(path: PathBuf) -> Self {
         if !path.exists() {
+            let has_backup = corrupt_backup_path(&path).exists();
             return Self {
                 path,
                 entries: Vec::new(),
-                recovered_from_corrupt: false,
+                recovered_from_corrupt: has_backup,
+            };
+        }
+
+        if let Ok(meta) = fs::metadata(&path)
+            && meta.len() > MAX_HISTORY_FILE_BYTES
+        {
+            log::warn!(
+                "history file exceeds size cap ({} bytes); backing up to history.bad.json",
+                meta.len()
+            );
+            backup_corrupt_file(&path);
+            return Self {
+                path,
+                entries: Vec::new(),
+                recovered_from_corrupt: true,
             };
         }
 
@@ -83,7 +112,12 @@ impl HistoryStore {
                     }
                 }
                 Err(err) => {
-                    log::warn!("history JSON invalid ({err}); backing up to history.bad.json");
+                    log::warn!(
+                        "history JSON invalid (kind={:?} line={} col={}); backing up to history.bad.json",
+                        err.classify(),
+                        err.line(),
+                        err.column()
+                    );
                     backup_corrupt_file(&path);
                     Self {
                         path,
@@ -93,7 +127,10 @@ impl HistoryStore {
                 }
             },
             Err(err) => {
-                log::warn!("failed reading history file ({err}); starting empty");
+                log::warn!(
+                    "failed reading history file ({}); starting empty",
+                    err.kind()
+                );
                 backup_corrupt_file(&path);
                 Self {
                     path,
@@ -108,7 +145,8 @@ impl HistoryStore {
         self.entries.clone()
     }
 
-    /// Records a new history entry when `enabled` is true, capping at `MAX_HISTORY_ENTRIES`.
+    /// Records a new history entry when `enabled` is true, capping at `MAX_HISTORY_ENTRIES` and
+    /// bounding field lengths.
     pub fn record(&mut self, enabled: bool, new_entry: NewHistoryEntry) -> std::io::Result<()> {
         if !enabled {
             return Ok(());
@@ -120,25 +158,40 @@ impl HistoryStore {
             .unwrap_or(0);
         let id = format!("{timestamp_ms}-{}", self.entries.len());
 
+        let action = sanitize_log_value(&new_entry.action, MAX_META_CHARS);
+        let source_app = new_entry
+            .source_app
+            .as_deref()
+            .map(|s| sanitize_log_value(s, MAX_META_CHARS))
+            .filter(|s| !s.is_empty());
+        let model = sanitize_log_value(&new_entry.model, MAX_META_CHARS);
+        let cost_usd = new_entry.cost_usd.filter(|c| c.is_finite() && *c >= 0.0);
+
         self.entries.insert(
             0,
             HistoryEntry {
                 id,
                 timestamp_ms,
-                action: new_entry.action,
-                source_app: new_entry.source_app,
-                model: new_entry.model,
-                cost_usd: new_entry.cost_usd,
-                original: new_entry.original,
-                result: new_entry.result,
+                action,
+                source_app,
+                model,
+                cost_usd,
+                original: truncate_chars(&new_entry.original, EDITOR_MAX_INPUT_CHARS),
+                result: truncate_chars(&new_entry.result, EDITOR_MAX_INPUT_CHARS),
             },
         );
         self.entries.truncate(MAX_HISTORY_ENTRIES);
         self.persist()
     }
 
+    /// Clears all in-memory and on-disk history, including any corrupt-recovery `history.bad.json`.
     pub fn clear(&mut self) -> std::io::Result<()> {
         self.entries.clear();
+        self.recovered_from_corrupt = false;
+        let bad_path = corrupt_backup_path(&self.path);
+        if bad_path.exists() {
+            fs::remove_file(&bad_path)?;
+        }
         self.persist()
     }
 
@@ -153,22 +206,20 @@ impl HistoryStore {
         let serialized = serde_json::to_string_pretty(&payload)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         let tmp_path = self.path.with_extension("json.tmp");
-        fs::write(&tmp_path, serialized)?;
-        if self.path.exists() {
-            let _ = fs::remove_file(&self.path);
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(serialized.as_bytes())?;
+            file.sync_all()?;
         }
-        fs::rename(tmp_path, &self.path)?;
+        fs::rename(&tmp_path, &self.path)?;
         Ok(())
     }
 }
 
 fn backup_corrupt_file(path: &Path) {
-    let bad_path = path.with_file_name("history.bad.json");
-    if bad_path.exists() {
-        let _ = fs::remove_file(&bad_path);
-    }
+    let bad_path = corrupt_backup_path(path);
     if let Err(err) = fs::rename(path, &bad_path) {
-        log::warn!("could not rename corrupt history file: {err}");
+        log::warn!("could not rename corrupt history file: {}", err.kind());
     }
 }
 
@@ -263,15 +314,20 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_history_file_backs_up_and_recovers() {
+    fn corrupt_history_file_backs_up_and_clear_removes_backup() {
         let dir = temp_dir("corrupt");
         let path = history_path(&dir);
         fs::write(&path, "[[not valid json").expect("write");
-        let store = HistoryStore::load_from_path(path.clone());
+        let mut store = HistoryStore::load_from_path(path.clone());
         assert!(store.recovered_from_corrupt);
         assert!(store.entries().is_empty());
         assert!(!path.exists());
         assert!(dir.join("history.bad.json").exists());
+
+        store.clear().expect("clear should purge history.bad.json");
+        assert!(!store.recovered_from_corrupt);
+        assert!(!dir.join("history.bad.json").exists());
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use thiserror::Error;
@@ -36,8 +38,24 @@ pub fn init_store() -> Result<(), SecretError> {
 }
 
 fn open_entry() -> Result<keyring_core::Entry, SecretError> {
-    keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_OPENROUTER_USER)
+    #[cfg(windows)]
+    {
+        // Use LocalMachine persistence (`CRED_PERSIST_LOCAL_MACHINE`) instead of Enterprise
+        // roaming so the API key stays bound to this Windows machine.
+        let modifiers = HashMap::from([("persistence", "local")]);
+        keyring_core::Entry::new_with_modifiers(
+            KEYRING_SERVICE,
+            KEYRING_OPENROUTER_USER,
+            &modifiers,
+        )
         .map_err(|err| SecretError::Store(err.to_string()))
+    }
+
+    #[cfg(not(windows))]
+    {
+        keyring_core::Entry::new(KEYRING_SERVICE, KEYRING_OPENROUTER_USER)
+            .map_err(|err| SecretError::Store(err.to_string()))
+    }
 }
 
 pub fn has_api_key() -> Result<bool, SecretError> {

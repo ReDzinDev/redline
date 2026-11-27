@@ -1,10 +1,17 @@
 use serde::Deserialize;
 
+use crate::ai::prompts::sanitize_output_text;
 use crate::ai::provider::{AiError, Completion};
+use crate::app_info::sanitize_log_value;
+
+const MAX_SSE_LINE_BYTES: usize = 256 * 1024;
+const MAX_COMPLETION_BYTES: usize = 512 * 1024;
+const MAX_MODEL_ID_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SseFeedStatus {
-    /// True if at least one `data:` event was processed in this chunk (excludes `:` keep-alives).
+    /// True if at least one meaningful `data:` event (content, finish_reason, usage, or `[DONE]`)
+    /// was processed in this chunk (excludes `:` keep-alives and empty `data: {}` frames).
     pub saw_data: bool,
     /// True once `data: [DONE]` has been observed.
     pub done: bool,
@@ -57,7 +64,7 @@ struct StreamError {
 }
 
 /// Incremental SSE parser that buffers raw bytes so multi-byte UTF-8 characters split across
-/// network chunks decode losslessly.
+/// network chunks decode losslessly while enforcing strict per-line and total completion limits.
 pub struct SseParser {
     buf: Vec<u8>,
     text: String,
@@ -70,10 +77,11 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn new(requested_model: impl Into<String>) -> Self {
+        let model = sanitize_log_value(&requested_model.into(), MAX_MODEL_ID_CHARS);
         Self {
             buf: Vec::new(),
             text: String::new(),
-            model_used: requested_model.into(),
+            model_used: model,
             cost_usd: None,
             finish_reason: None,
             reasoning_tokens: None,
@@ -86,20 +94,36 @@ impl SseParser {
         chunk: &[u8],
         on_delta: &mut impl FnMut(&str),
     ) -> Result<SseFeedStatus, AiError> {
-        self.buf.extend_from_slice(chunk);
         let mut status = SseFeedStatus::default();
+        let mut slice = chunk;
 
-        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
-            let mut line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
-            // Drop trailing '\n' and optional '\r'.
-            line_bytes.pop();
-            if line_bytes.last() == Some(&b'\r') {
-                line_bytes.pop();
-            }
+        while !slice.is_empty() {
+            if let Some(pos) = slice.iter().position(|&b| b == b'\n') {
+                let seg = &slice[..pos];
+                if self.buf.len().saturating_add(seg.len()) > MAX_SSE_LINE_BYTES {
+                    return Err(AiError::MidStream {
+                        message: Some("Provider SSE line exceeded size limit".to_string()),
+                    });
+                }
+                self.buf.extend_from_slice(seg);
+                slice = &slice[pos + 1..];
 
-            let line = String::from_utf8_lossy(&line_bytes);
-            self.process_line(&line, &mut status, on_delta)?;
-            if status.done {
+                if self.buf.last() == Some(&b'\r') {
+                    self.buf.pop();
+                }
+                let line_bytes = std::mem::take(&mut self.buf);
+                let line = String::from_utf8_lossy(&line_bytes);
+                self.process_line(&line, &mut status, on_delta)?;
+                if status.done {
+                    break;
+                }
+            } else {
+                if self.buf.len().saturating_add(slice.len()) > MAX_SSE_LINE_BYTES {
+                    return Err(AiError::MidStream {
+                        message: Some("Provider SSE line exceeded size limit".to_string()),
+                    });
+                }
+                self.buf.extend_from_slice(slice);
                 break;
             }
         }
@@ -149,41 +173,49 @@ impl SseParser {
             return Ok(());
         }
 
-        status.saw_data = true;
-
         if payload == "[DONE]" {
             self.saw_done = true;
+            status.saw_data = true;
             status.done = true;
             return Ok(());
         }
 
         let parsed: StreamChunk = serde_json::from_str(payload).map_err(|err| {
-            log::warn!("malformed SSE JSON chunk: {err}");
+            log::warn!(
+                "malformed SSE JSON chunk: kind={:?} line={} col={}",
+                err.classify(),
+                err.line(),
+                err.column()
+            );
             AiError::MidStream {
                 message: Some("Malformed response from provider".to_string()),
             }
         })?;
 
         if let Some(err) = parsed.error {
+            status.saw_data = true;
             return Err(AiError::MidStream {
-                message: err.message,
+                message: err.message.map(|m| sanitize_log_value(&m, 256)),
             });
         }
 
-        if let Some(model) = parsed.model
-            && !model.is_empty()
-        {
-            self.model_used = model;
+        if let Some(model) = parsed.model {
+            let clean_model = sanitize_log_value(&model, MAX_MODEL_ID_CHARS);
+            if !clean_model.is_empty() {
+                self.model_used = clean_model;
+            }
         }
 
         if let Some(usage) = parsed.usage {
             if let Some(cost) = usage.cost {
                 self.cost_usd = Some(cost);
+                status.saw_data = true;
             }
             if let Some(details) = usage.completion_tokens_details
                 && let Some(rt) = details.reasoning_tokens
             {
                 self.reasoning_tokens = Some(rt);
+                status.saw_data = true;
             }
         }
 
@@ -191,14 +223,24 @@ impl SseParser {
             if let Some(reason) = choice.finish_reason
                 && !reason.is_empty()
             {
-                self.finish_reason = Some(reason);
+                self.finish_reason = Some(sanitize_log_value(&reason, 64));
+                status.saw_data = true;
             }
             if let Some(delta) = choice.delta
                 && let Some(content) = delta.content
                 && !content.is_empty()
             {
-                self.text.push_str(&content);
-                on_delta(&content);
+                let sanitized = sanitize_output_text(&content);
+                if !sanitized.is_empty() {
+                    if self.text.len().saturating_add(sanitized.len()) > MAX_COMPLETION_BYTES {
+                        return Err(AiError::MidStream {
+                            message: Some("Provider response exceeded size limit".to_string()),
+                        });
+                    }
+                    status.saw_data = true;
+                    self.text.push_str(&sanitized);
+                    on_delta(&sanitized);
+                }
             }
         }
 
@@ -244,10 +286,13 @@ mod tests {
     }
 
     #[test]
-    fn keep_alive_alone_does_not_mark_saw_data() {
+    fn keep_alive_and_empty_data_frames_do_not_mark_saw_data() {
         let mut parser = SseParser::new("test");
         let status = parser
-            .feed(b": OPENROUTER PROCESSING\n\n", &mut |_| {})
+            .feed(
+                b": OPENROUTER PROCESSING\n\ndata: {}\ndata: {\"choices\":[{\"delta\":{}}]}\n",
+                &mut |_| {},
+            )
             .expect("feed ok");
         assert!(!status.saw_data);
         assert!(!status.done);
@@ -286,5 +331,46 @@ mod tests {
         let length_cut = parser2.finish(&mut |_| {}).expect("finish ok");
         assert!(!length_cut.complete);
         assert_eq!(length_cut.finish_reason, "length");
+    }
+
+    #[test]
+    fn rejects_oversized_sse_line_and_oversized_completion() {
+        let mut parser = SseParser::new("test");
+        let huge_line = vec![b'a'; MAX_SSE_LINE_BYTES + 1];
+        let err = parser
+            .feed(&huge_line, &mut |_| {})
+            .expect_err("oversized line should fail");
+        assert_eq!(err.code(), "ai_mid_stream");
+
+        let mut parser2 = SseParser::new("test");
+        let piece = "x".repeat(60_000);
+        let chunk = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{piece}\"}}}}]}}\n");
+        let mut hit_err = false;
+        for _ in 0..12 {
+            if parser2.feed(chunk.as_bytes(), &mut |_| {}).is_err() {
+                hit_err = true;
+                break;
+            }
+        }
+        assert!(hit_err, "oversized total completion should fail");
+    }
+
+    #[test]
+    fn sanitizes_remote_model_id_and_delta_controls() {
+        let mut parser = SseParser::new("test");
+        let payload = concat!(
+            "data: {\"model\":\"evil/model\\r\\nINJECTED\\u001b[31m\",\"choices\":[{\"delta\":{\"content\":\"Hi\\u0000\\u202eWorld\"},\"finish_reason\":\"stop\"}]}\n",
+            "data: [DONE]\n"
+        );
+        let mut streamed = String::new();
+        parser
+            .feed(payload.as_bytes(), &mut |d| streamed.push_str(d))
+            .expect("feed ok");
+        let completion = parser.finish(&mut |_| {}).expect("finish ok");
+        assert!(!completion.model_used.contains('\r'));
+        assert!(!completion.model_used.contains('\n'));
+        assert!(!completion.model_used.contains('\x1b'));
+        assert_eq!(completion.text, "HiWorld");
+        assert_eq!(streamed, "HiWorld");
     }
 }
