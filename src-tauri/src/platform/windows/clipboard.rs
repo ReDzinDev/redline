@@ -74,6 +74,7 @@ pub enum ClipboardError {
 pub enum DelayedPasteOutcome {
     Pasted { rendered: bool },
     FocusLost,
+    Cancelled,
 }
 
 /// Pure decision function for which clipboard formats are safe and useful to snapshot/restore.
@@ -489,46 +490,55 @@ unsafe extern "system" fn paste_wndproc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if msg == WM_CLOSE {
-        // Ignore external WM_CLOSE so another process cannot prematurely destroy our paste window.
-        return LRESULT(0);
-    }
-
-    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const DelayedPasteState;
-    if !state_ptr.is_null() {
-        // SAFETY: `state_ptr` points to a heap-pinned `DelayedPasteState` that outlives `hwnd`
-        // (guaranteed by `PasteWindowGuard`'s drop order) and uses only shared `&DelayedPasteState`
-        // + `Cell` interior mutability, avoiding any `&mut` aliasing violation.
-        let state = unsafe { &*state_ptr };
-        match msg {
-            WM_RENDERFORMAT => {
-                // Genuine Win32 delayed-render requests are sent synchronously by the OS.
-                if wparam.0 as u32 == CF_UNICODETEXT && unsafe { InSendMessage() }.as_bool() {
-                    if let Err(err) =
-                        unsafe { set_hglobal_bytes(CF_UNICODETEXT, &state.utf16_bytes) }
-                    {
-                        log::warn!("WM_RENDERFORMAT failed to provide text: {err}");
-                    }
-                    state.rendered.set(true);
-                }
-                return LRESULT(0);
-            }
-            WM_RENDERALLFORMATS => {
-                if let Ok(_guard) = open_clipboard_with_retry(Some(hwnd)) {
-                    let _ = unsafe { set_hglobal_bytes(CF_UNICODETEXT, &state.utf16_bytes) };
-                    state.rendered.set(true);
-                }
-                return LRESULT(0);
-            }
-            WM_DESTROYCLIPBOARD => {
-                // Verify we genuinely lost clipboard ownership (guards against spoofed PostMessage).
-                if unsafe { GetClipboardOwner() }.ok() != Some(hwnd) {
-                    state.ownership_lost.set(true);
-                }
-                return LRESULT(0);
-            }
-            _ => {}
+    let handled = std::panic::catch_unwind(|| {
+        if msg == WM_CLOSE {
+            // Ignore external WM_CLOSE so another process cannot prematurely destroy our paste window.
+            return Some(LRESULT(0));
         }
+
+        let state_ptr =
+            unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const DelayedPasteState;
+        if !state_ptr.is_null() {
+            // SAFETY: `state_ptr` points to a heap-pinned `DelayedPasteState` that outlives `hwnd`
+            // (guaranteed by `PasteWindowGuard`'s drop order) and uses only shared `&DelayedPasteState`
+            // + `Cell` interior mutability, avoiding any `&mut` aliasing violation.
+            let state = unsafe { &*state_ptr };
+            match msg {
+                WM_RENDERFORMAT => {
+                    // Genuine Win32 delayed-render requests are sent synchronously by the OS.
+                    if wparam.0 == CF_UNICODETEXT as usize && unsafe { InSendMessage() }.as_bool() {
+                        match unsafe { set_hglobal_bytes(CF_UNICODETEXT, &state.utf16_bytes) } {
+                            Ok(()) => state.rendered.set(true),
+                            Err(err) => {
+                                log::warn!("WM_RENDERFORMAT failed to provide text: {err}");
+                            }
+                        }
+                    }
+                    return Some(LRESULT(0));
+                }
+                WM_RENDERALLFORMATS => {
+                    if let Ok(_guard) = open_clipboard_with_retry(Some(hwnd))
+                        && unsafe { set_hglobal_bytes(CF_UNICODETEXT, &state.utf16_bytes) }.is_ok()
+                    {
+                        state.rendered.set(true);
+                    }
+                    return Some(LRESULT(0));
+                }
+                WM_DESTROYCLIPBOARD => {
+                    // Verify we genuinely lost clipboard ownership (guards against spoofed PostMessage).
+                    if unsafe { GetClipboardOwner() }.ok() != Some(hwnd) {
+                        state.ownership_lost.set(true);
+                    }
+                    return Some(LRESULT(0));
+                }
+                _ => {}
+            }
+        }
+        None
+    });
+
+    if let Ok(Some(res)) = handled {
+        return res;
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
@@ -572,6 +582,11 @@ pub fn paste_with_delayed_rendering(
     // Drop order is LIFO: `msg_window` drops first (detaching GWLP_USERDATA & destroying HWND),
     // then `state`, then `snapshot` (calling EmptyClipboard safely with no live paste_wndproc).
     let mut snapshot = ClipboardSnapshot::capture()?;
+    if cancelled.load(Ordering::SeqCst) {
+        // Snapshot has not modified the clipboard yet; disarm so newer user copies are not clobbered.
+        snapshot.disarm();
+        return Ok(DelayedPasteOutcome::Cancelled);
+    }
     let hinstance = ensure_paste_window_class()?;
 
     let state = Box::new(DelayedPasteState {
@@ -601,15 +616,25 @@ pub fn paste_with_delayed_rendering(
 
     input::wait_for_modifiers_released(PASTE_MODIFIER_WAIT_TIMEOUT);
 
-    // Re-verify foreground HWND + PID and job cancellation right before injecting synthetic Ctrl+V.
-    if cancelled.load(Ordering::SeqCst)
-        || !focus::is_foreground_target(expected_target.0, expected_target.1)
-    {
+    // Re-verify job cancellation and foreground HWND + PID immediately before injecting Ctrl+V.
+    let was_cancelled = cancelled.load(Ordering::SeqCst);
+    let target_still_fg =
+        !was_cancelled && focus::is_foreground_target(expected_target.0, expected_target.1);
+    if was_cancelled || !target_still_fg {
+        let still_owner = unsafe { GetClipboardOwner() }.ok() == Some(msg_hwnd);
         drop(msg_window);
-        if let Err(err) = snapshot.restore() {
-            log::warn!("failed to restore clipboard after focus drift: {err}");
+        if still_owner {
+            if let Err(err) = snapshot.restore() {
+                log::warn!("failed to restore clipboard after aborted paste: {err}");
+            }
+        } else {
+            snapshot.disarm();
         }
-        return Ok(DelayedPasteOutcome::FocusLost);
+        return Ok(if was_cancelled {
+            DelayedPasteOutcome::Cancelled
+        } else {
+            DelayedPasteOutcome::FocusLost
+        });
     }
 
     input::send_paste_keys();

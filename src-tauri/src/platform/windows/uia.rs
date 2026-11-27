@@ -2,7 +2,7 @@ use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationTextPattern,
+    CUIAutomation, CUIAutomation8, IUIAutomation, IUIAutomation2, IUIAutomationTextPattern,
     IUIAutomationTextPattern2, UIA_TextPattern2Id, UIA_TextPatternId,
 };
 use windows::core::Interface;
@@ -28,12 +28,20 @@ pub struct UiaReader {
 impl UiaReader {
     pub fn new() -> Self {
         // SAFETY: Called on the MTA COM worker thread after `init_mta_com()`.
+        // Prefer `CUIAutomation8` (supports `IUIAutomation2` timeouts) with fallback to legacy `CUIAutomation`.
         let automation = unsafe {
             CoCreateInstance::<_, IUIAutomation>(
-                &CUIAutomation,
+                &CUIAutomation8,
                 None::<&windows::core::IUnknown>,
                 CLSCTX_INPROC_SERVER,
             )
+            .or_else(|_| {
+                CoCreateInstance::<_, IUIAutomation>(
+                    &CUIAutomation,
+                    None::<&windows::core::IUnknown>,
+                    CLSCTX_INPROC_SERVER,
+                )
+            })
         }
         .ok();
         if let Some(ref uia) = automation {

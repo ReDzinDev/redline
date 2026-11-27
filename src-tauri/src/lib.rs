@@ -325,6 +325,8 @@ fn on_hotkey_pressed(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    platform::windows::harden_dll_search_order();
     install_panic_hook();
 
     let app = tauri::Builder::default()

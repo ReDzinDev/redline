@@ -353,7 +353,19 @@ fn run_capture(
         return Err(CaptureError::NothingSelected);
     }
 
-    let snapshot = clipboard::ClipboardSnapshot::capture().map_err(map_clip_err)?;
+    let mut snapshot = clipboard::ClipboardSnapshot::capture().map_err(map_clip_err)?;
+
+    // Re-verify cancellation and foreground target AFTER ClipboardSnapshot::capture() (which
+    // may block on OpenClipboard retries or cross-process delayed rendering) and BEFORE SendInput.
+    if cancel.load(Ordering::SeqCst) || !focus::is_foreground_target(target.hwnd, target.pid) {
+        snapshot.disarm();
+        return Err(if cancel.load(Ordering::SeqCst) {
+            CaptureError::Failed("capture cancelled".to_string())
+        } else {
+            CaptureError::NothingSelected
+        });
+    }
+
     let seq_before = clipboard::sequence_number();
 
     let use_ctrl_shift_c = focus::is_terminal_process(&target.process_name);
@@ -428,6 +440,9 @@ fn run_paste(
     }
 
     if !focus::restore_focus(target.hwnd, target.pid) {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(CaptureError::Failed("paste cancelled".to_string()));
+        }
         log::warn!(
             "could not restore focus to pid={}; copying result as fallback",
             target.pid
@@ -440,7 +455,11 @@ fn run_paste(
     // before receiving Ctrl+V.
     std::thread::sleep(Duration::from_millis(30));
 
-    if cancel.load(Ordering::SeqCst) || !focus::is_foreground_target(target.hwnd, target.pid) {
+    if cancel.load(Ordering::SeqCst) {
+        return Err(CaptureError::Failed("paste cancelled".to_string()));
+    }
+
+    if !focus::is_foreground_target(target.hwnd, target.pid) {
         log::warn!(
             "focus shifted before delayed paste for pid={}; copying result as fallback",
             target.pid
@@ -454,6 +473,9 @@ fn run_paste(
     {
         clipboard::DelayedPasteOutcome::Pasted { rendered } => {
             Ok(PasteOutcome::Pasted { rendered })
+        }
+        clipboard::DelayedPasteOutcome::Cancelled => {
+            Err(CaptureError::Failed("paste cancelled".to_string()))
         }
         clipboard::DelayedPasteOutcome::FocusLost => {
             log::warn!(

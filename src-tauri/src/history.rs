@@ -105,10 +105,11 @@ impl HistoryStore {
             Ok(raw) => match serde_json::from_str::<HistoryFile>(&raw) {
                 Ok(mut parsed) => {
                     parsed.entries.truncate(MAX_HISTORY_ENTRIES);
+                    let has_backup = corrupt_backup_path(&path).exists();
                     Self {
                         path,
                         entries: parsed.entries,
-                        recovered_from_corrupt: false,
+                        recovered_from_corrupt: has_backup,
                     }
                 }
                 Err(err) => {
